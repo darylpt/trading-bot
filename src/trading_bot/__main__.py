@@ -42,6 +42,7 @@ def main() -> None:
             os.environ["BROKER_ENDPOINT"]
         ),
         daily_drawdown_limit=Decimal(os.environ["DAILY_DRAWDOWN_LIMIT"]),
+        broker_token=os.environ["BROKER_TOKEN"],
     )
     logging.basicConfig(level=logging.INFO)
     LOGGER.info(

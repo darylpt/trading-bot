@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -24,6 +25,24 @@ def test_sqlite_trade_write_is_idempotent(tmp_path: Path) -> None:
     repository.save_trade(record)
     assert repository.trade_count() == 1
     repository.close()
+
+
+def test_session_metrics_accumulate_latency_and_blackouts(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "metrics.sqlite")
+    session_date = date(2026, 9, 10)
+
+    repository.record_session_metrics(
+        session_date, broker_latency_ms=120, news_blackout_hit=True
+    )
+    repository.record_session_metrics(session_date, broker_latency_ms=80)
+
+    metrics = repository.get_session_metrics(session_date)
+    repository.close()
+
+    assert metrics is not None
+    assert metrics.broker_latency_total_ms == 200
+    assert metrics.broker_latency_samples == 2
+    assert metrics.news_blackout_hits == 1
 
 
 def test_observability_redacts_sensitive_keys_and_values() -> None:

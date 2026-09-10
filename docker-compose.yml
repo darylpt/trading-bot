@@ -10,6 +10,7 @@ services:
       BROKER_ENV: "demo"
       BROKER_PROVIDER: "oanda"
       BROKER_ENDPOINT: "https://api-fxpractice.oanda.com"
+      BROKER_TOKEN: ${BROKER_TOKEN:?BROKER_TOKEN must be set in .env}
       DAILY_DRAWDOWN_LIMIT: "0.02"
       DATA_DIR: /app/data
       LOG_DIR: /app/logs
@@ -21,6 +22,18 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "python", "-m", "config.health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
     command: ["python", "-m", "trading_bot"]
 
@@ -35,9 +48,15 @@ services:
       BROKER_ENV: "demo"
       BROKER_PROVIDER: "oanda"
       BROKER_ENDPOINT: "https://api-fxpractice.oanda.com"
+      BROKER_TOKEN: ${BROKER_TOKEN:?BROKER_TOKEN must be set in .env}
       DAILY_DRAWDOWN_LIMIT: "0.02"
       DATA_DIR: /tmp/trading-bot-data
       LOG_DIR: /tmp/trading-bot-logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     profiles:
       - test
     command: ["pytest", "-q"]
@@ -56,6 +75,11 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   bot_data:

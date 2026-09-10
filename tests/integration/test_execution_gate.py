@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from domain.models import BrokerOrderPayload, ExecutionResult, OrderIntent
 from execution.executor import ExecutionGate
+from execution.broker_adapter import BrokerConnectionError
 
 
 class FakeGateway:
@@ -60,3 +61,11 @@ def test_timeout_is_unknown_and_not_retried() -> None:
     assert result.status == "UNKNOWN"
     assert gateway.calls == 1
     assert ExecutionGate(gateway, environment="PAPER").reconcile("exec-1") is not None
+
+
+def test_broker_connection_failure_rejects_new_entry() -> None:
+    gateway = FakeGateway(error=BrokerConnectionError("rate limited"))
+    result = ExecutionGate(gateway, environment="PAPER").submit(order())
+    assert result.status == "REJECTED"
+    assert result.rejection_reason == "BrokerConnectionError"
+    assert gateway.calls == 1

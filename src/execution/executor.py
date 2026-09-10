@@ -7,6 +7,7 @@ from typing import Literal
 from domain.models import ExecutionResult, OrderIntent
 from execution.payloads import payload_from_intent
 from execution.protocols import BrokerGateway
+from execution.broker_adapter import BrokerConnectionError
 from risk.limits import validate_order_risk
 
 
@@ -46,6 +47,13 @@ class ExecutionGate:
             )
         try:
             return self._gateway.submit_order(payload)
+        except BrokerConnectionError as exc:
+            return ExecutionResult(
+                client_order_id=order.client_order_id,
+                status="REJECTED",
+                rejection_reason=type(exc).__name__,
+                environment=environment,
+            )
         except (TimeoutError, ConnectionError) as exc:
             return ExecutionResult(
                 client_order_id=order.client_order_id,

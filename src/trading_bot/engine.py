@@ -1,6 +1,7 @@
 """Central technical, sentiment, risk, execution, and persistence pipeline."""
 
 from __future__ import annotations
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -24,6 +25,10 @@ from sentiment.news_gate import is_in_news_blackout
 from strategy.indicators import calculate_indicators
 from strategy.market_data import MarketDataError
 from strategy.signals import generate_signal
+
+from observability.logging import log_trade_lifecycle_event
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -223,6 +228,20 @@ class TradingEngine:
                 slippage=execution.slippage,
             )
         )
+        log_trade_lifecycle_event(
+            LOGGER,
+            timestamp=now,
+            signal=technical_signal.direction,
+            news_blackout_status="CLEAR",
+            llm_decision=sentiment.decision,
+            risk_size=order.quantity,
+            broker_latency_ms=execution.latency_ms,
+            execution_status=execution.status,
+        )
+        self._repository.record_session_metrics(
+            now.date(),
+            broker_latency_ms=execution.latency_ms,
+        )
         return SentimentPipelineResult(
             client_order_id=client_order_id,
             technical_signal=technical_signal,
@@ -278,6 +297,25 @@ class TradingEngine:
                 error_class="PipelineRejection",
                 message=reason,
             )
+        )
+        event_timestamp = datetime.now(timezone.utc)
+        log_trade_lifecycle_event(
+            LOGGER,
+            timestamp=event_timestamp,
+            signal=(
+                technical_signal.direction if technical_signal is not None else None
+            ),
+            news_blackout_status=(
+                "BLOCKED" if event_type == "NEWS_BLACKOUT" else "CLEAR"
+            ),
+            llm_decision=sentiment.decision if sentiment is not None else None,
+            risk_size=None,
+            broker_latency_ms=None,
+            execution_status="REJECTED",
+        )
+        self._repository.record_session_metrics(
+            event_timestamp.date(),
+            news_blackout_hit=event_type == "NEWS_BLACKOUT",
         )
         return SentimentPipelineResult(
             client_order_id=client_order_id,

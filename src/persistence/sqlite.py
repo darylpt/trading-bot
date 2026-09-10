@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -36,6 +36,17 @@ class ExecutionLogRecord:
     message: str
     latency_ms: int | None = None
     slippage: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class SessionMetricsRecord:
+    """Daily aggregate metrics for forward-test reporting."""
+
+    session_date: date
+    broker_latency_total_ms: int
+    broker_latency_samples: int
+    news_blackout_hits: int
+    updated_at: datetime
 
 
 class SQLiteRepository:
@@ -128,6 +139,57 @@ class SQLiteRepository:
         """Return the number of persisted operational events."""
         row = self.connection.execute("SELECT COUNT(*) FROM execution_logs").fetchone()
         return int(row[0]) if row is not None else 0
+
+    def record_session_metrics(
+        self,
+        session_date: date,
+        *,
+        broker_latency_ms: int | None = None,
+        news_blackout_hit: bool = False,
+    ) -> None:
+        """Atomically accumulate daily latency and blackout metrics."""
+        if broker_latency_ms is not None and broker_latency_ms < 0:
+            raise ValueError("broker latency must be non-negative")
+        self.connection.execute(
+            """INSERT INTO session_metrics
+               (session_date, broker_latency_total_ms, broker_latency_samples,
+                news_blackout_hits, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(session_date) DO UPDATE SET
+                 broker_latency_total_ms =
+                   broker_latency_total_ms + excluded.broker_latency_total_ms,
+                 broker_latency_samples =
+                   broker_latency_samples + excluded.broker_latency_samples,
+                 news_blackout_hits =
+                   news_blackout_hits + excluded.news_blackout_hits,
+                 updated_at = excluded.updated_at""",
+            (
+                session_date.isoformat(),
+                broker_latency_ms or 0,
+                1 if broker_latency_ms is not None else 0,
+                1 if news_blackout_hit else 0,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self.connection.commit()
+
+    def get_session_metrics(self, session_date: date) -> SessionMetricsRecord | None:
+        """Return the aggregate metrics for one UTC trading session."""
+        row = self.connection.execute(
+            """SELECT session_date, broker_latency_total_ms,
+                      broker_latency_samples, news_blackout_hits, updated_at
+               FROM session_metrics WHERE session_date = ?""",
+            (session_date.isoformat(),),
+        ).fetchone()
+        if row is None:
+            return None
+        return SessionMetricsRecord(
+            session_date=date.fromisoformat(str(row[0])),
+            broker_latency_total_ms=int(row[1]),
+            broker_latency_samples=int(row[2]),
+            news_blackout_hits=int(row[3]),
+            updated_at=datetime.fromisoformat(str(row[4])),
+        )
 
     def close(self) -> None:
         self.connection.close()

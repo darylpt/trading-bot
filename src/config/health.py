@@ -27,3 +27,12 @@ def check_container_health() -> ContainerHealth:
         python_version=version,
         timestamp=datetime.now(timezone.utc),
     )
+
+
+def main() -> None:
+    """Emit a machine-readable health result for container probes."""
+    sys.stdout.write(check_container_health().model_dump_json() + "\n")
+
+
+if __name__ == "__main__":
+    main()

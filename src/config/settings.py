@@ -19,6 +19,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        populate_by_name=True,
     )
 
     paper_trading: bool = Field(validation_alias="PAPER_TRADING")
@@ -41,6 +42,7 @@ class Settings(BaseSettings):
     ollama_base_url: AnyHttpUrl | None = Field(
         default=None, validation_alias="OLLAMA_BASE_URL"
     )
+    broker_token: str | None = Field(default=None, validation_alias="BROKER_TOKEN")
 
     @model_validator(mode="after")
     def enforce_safe_runtime(self) -> Settings:

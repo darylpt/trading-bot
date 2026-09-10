@@ -25,3 +25,11 @@ CREATE TABLE IF NOT EXISTS execution_logs (
     slippage NUMERIC,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS session_metrics (
+    session_date TEXT PRIMARY KEY,
+    broker_latency_total_ms INTEGER NOT NULL CHECK (broker_latency_total_ms >= 0),
+    broker_latency_samples INTEGER NOT NULL CHECK (broker_latency_samples >= 0),
+    news_blackout_hits INTEGER NOT NULL CHECK (news_blackout_hits >= 0),
+    updated_at TEXT NOT NULL
+);
