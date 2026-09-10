@@ -15,6 +15,7 @@ market data -> strategy signal -> risk approval -> execution gate -> broker adap
 - `src/sentiment/` validates strict JSON sentiment and news blackout state. Sentiment never submits orders.
 - `src/trading_bot/risk.py` is the Phase 3 pre-trade risk boundary.
 - `src/trading_bot/execution.py` is the Phase 4 paper execution boundary: it fills approved orders, persists positions, evaluates protective and counter-signal exits, and records realized P&L.
+- `src/trading_bot/broker/` owns MT5 demo connection selection, local fallback quotes, and midpoint bar aggregation into `market_data.csv`.
 - `src/risk/` contains reusable sizing, ATR exits, and order-risk calculations.
 - `src/execution/` contains broker-neutral payloads, adapters, reconciliation, and the rejecting execution gate.
 - `src/persistence/` owns SQLite schema creation, operational writes, session metrics, and the cross-shell CLI.
@@ -29,10 +30,12 @@ All values below are safe paper/demo defaults. Secrets are injected at runtime o
 | --- | --- | --- |
 | `PAPER_TRADING` | `true` | Must remain true for local/container execution. |
 | `LIVE_TRADING` | `false` | Must remain false by default. |
-| `BROKER_ENV` | `demo` | Allowed values: `paper`, `demo`. |
+| `BROKER_ENV` | `demo` | Allowed values: `paper`, `demo`; demo mode uses the local simulated feed. |
 | `BROKER_PROVIDER` | `mt5` in Compose, `oanda` in settings | Selects the provider adapter. |
-| `BROKER_ENDPOINT` | unset | Optional provider URL; demo/practice endpoints only. |
+| `BROKER_ENDPOINT` | unset | Optional demo/practice MT5 REST bridge URL. |
 | `BROKER_TOKEN` | local demo placeholder | Runtime credential; never commit a real token. |
+| `BROKER_ACCOUNT` | unset | Optional MT5 demo account identifier; missing values use local fallback. |
+| `BROKER_SERVER` | unset | Optional Exness MT5 demo server name; missing values use local fallback. |
 | `DAILY_DRAWDOWN_LIMIT` | `0.05` | Daily loss fraction used by Phase 3 risk guardrails. |
 | `TICK_INTERVAL_SECONDS` | `60` | Positive daemon interval; `--interval` may override it. |
 | `DATA_DIR` | `data` locally, `/app/data` in Compose | Holds `market_data.csv` and `session_metrics.db`. |
@@ -61,6 +64,7 @@ Missing values must resolve to safe demo defaults or fail closed. Empty values a
 │   ├── sentiment/               # News and strict JSON LLM contracts
 │   ├── strategy/                # Candle loading and deterministic indicators
 │   └── trading_bot/             # Entrypoint, orchestration, signals, seeding
+│       └── broker/              # MT5 demo adapter, fallback, quote aggregation
 ├── tests/unit/                  # Pure validation and calculation tests
 ├── tests/integration/           # Pipeline, persistence, and adapter contracts
 ├── Dockerfile                  # Python 3.11-slim deterministic image
@@ -118,3 +122,11 @@ python -m compileall -q src tests
 - Every new exported contract requires caller coverage and strict type checking.
 - Risk and execution changes require an affected paper/demo smoke test in addition to unit tests.
 - Docker verification uses the Compose `test` service and safe runtime environment values.
+
+## Resume Verification Command
+
+Use this command at the start of a resumed session to inspect the persisted paper-trading state:
+
+```text
+docker compose exec app python -m persistence --database "/app/data/session_metrics.db" --query
+```

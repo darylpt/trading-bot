@@ -45,6 +45,8 @@ class Settings(BaseSettings):
         default=None, validation_alias="OLLAMA_BASE_URL"
     )
     broker_token: str | None = Field(default=None, validation_alias="BROKER_TOKEN")
+    broker_account: str | None = Field(default=None, validation_alias="BROKER_ACCOUNT")
+    broker_server: str | None = Field(default=None, validation_alias="BROKER_SERVER")
 
     @model_validator(mode="after")
     def enforce_safe_runtime(self) -> Settings:

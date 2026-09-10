@@ -22,7 +22,15 @@ from persistence.sqlite import (
     SQLiteRepository,
     SessionMetricsRecord,
 )
+from execution.broker_adapter import BrokerConnectionError
 from strategy.market_data import MarketDataError, load_csv_candles
+from trading_bot.broker import (
+    BrokerConnectionConfig,
+    LiveMarketDataGateway,
+    MT5BrokerAdapter,
+    MT5QuoteSource,
+    SimulatedQuoteSource,
+)
 from trading_bot.engine import PipelineConfig
 from trading_bot.execution import PaperExecutionEngine
 from trading_bot.market_data_seed import ensure_default_market_data
@@ -79,6 +87,27 @@ def _fetch_market_data(
         return ()
 
 
+def _create_market_data_gateway(
+    settings: Settings,
+) -> LiveMarketDataGateway | None:
+    if settings.provider != "mt5":
+        return None
+    config = BrokerConnectionConfig.from_environment(data_dir=settings.data_dir)
+    ensure_default_market_data(settings.data_dir)
+    fallback = SimulatedQuoteSource(config.fallback_data_path)
+    source = MT5QuoteSource(config, fallback=fallback)
+    adapter = MT5BrokerAdapter(source)
+    if adapter.fallback_reason is not None:
+        LOGGER.info(
+            "MT5 quote mode=%s reason=%s", adapter.mode, adapter.fallback_reason
+        )
+    return LiveMarketDataGateway(
+        adapter,
+        data_path=config.fallback_data_path,
+        instrument=config.instrument,
+    )
+
+
 def _evaluate_strategy(
     candles: Sequence[MarketCandle],
     *,
@@ -123,18 +152,25 @@ def run_tick(
     stop_distance: Decimal | None = None,
     daily_drawdown_limit: Decimal = Decimal("0.05"),
     execution_engine: PaperExecutionEngine | None = None,
+    market_data_gateway: LiveMarketDataGateway | None = None,
 ) -> SessionMetricsRecord:
-    """Fetch data, evaluate strategy and risk, then persist tick metrics."""
+    """Fetch live or paper data, then evaluate strategy, risk, and execution."""
     timestamp = current_time or datetime.now(timezone.utc)
     active_config = config or PipelineConfig()
-    candles = _fetch_market_data(
-        data_dir,
-        minimum_history=max(
-            active_config.fast_period,
-            active_config.slow_period,
+    minimum_history = max(active_config.fast_period, active_config.slow_period) + 1
+    if market_data_gateway is None:
+        candles = _fetch_market_data(data_dir, minimum_history=minimum_history)
+    else:
+        try:
+            live_candles = market_data_gateway.poll()
+        except (BrokerConnectionError, MarketDataError, OSError, ValueError) as exc:
+            LOGGER.warning("live market data rejected reason=%s", type(exc).__name__)
+            live_candles = ()
+        candles = (
+            live_candles
+            if live_candles
+            else _fetch_market_data(data_dir, minimum_history=minimum_history)
         )
-        + 1,
-    )
     try:
         signal = _evaluate_strategy(candles, timestamp=timestamp, config=active_config)
     except (MarketDataError, ValueError) as exc:
@@ -241,6 +277,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     session_start_equity = _optional_decimal_env("SESSION_START_EQUITY")
     stop_distance = _optional_decimal_env("RISK_STOP_DISTANCE")
     repository = SQLiteRepository(settings.data_dir / "session_metrics.db")
+    market_data_gateway = _create_market_data_gateway(settings)
     logging.basicConfig(level=logging.INFO)
     LOGGER.info(
         "paper/demo runtime ready provider=%s data_dir=%s sqlite_path=%s",
@@ -257,6 +294,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             session_start_equity=session_start_equity,
             stop_distance=stop_distance,
             daily_drawdown_limit=daily_drawdown_limit,
+            market_data_gateway=market_data_gateway,
         )
 
     try:

@@ -36,12 +36,21 @@ This roadmap is the delivery contract for the paper/demo trading system. Work ad
 - Reconcile fills and position state without bypassing the execution gate.
 - Update `session_metrics.db` with position, realized P&L, and win/loss outcomes.
 
-## Phase 5 — Exness MT5 Bridge (Active / Next)
+## Phase 5 — Exness MT5 Bridge (Complete)
 
-- Integrate a reviewed Exness MT5 demo/paper bridge.
-- Stream bid/ask market data through a provider adapter.
-- Submit only validated paper/demo orders through the single execution gate.
+- Integrate a demo-safe Exness MT5 adapter using `BROKER_TOKEN`, `BROKER_ACCOUNT`, `BROKER_SERVER`, and `BROKER_ENDPOINT`.
+- Fall back to the local simulated feed for `BROKER_ENV=demo` and unavailable MT5 bindings.
+- Poll bid/ask quotes and aggregate midpoint OHLCV bars into `market_data.csv`.
+- Wire the gateway into scheduled `run_tick()` execution using `TICK_INTERVAL_SECONDS`.
 - Preserve credential isolation, stale-data rejection, idempotency, and fail-closed behavior.
+
+## Resume Verification
+
+Before starting the next phase, inspect persisted paper metrics with:
+
+```text
+docker compose exec app python -m persistence --database "/app/data/session_metrics.db" --query
+```
 
 ## Delivery Rules
 
