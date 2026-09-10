@@ -19,7 +19,7 @@ This roadmap is the delivery contract for the paper/demo trading system. Work ad
 - Emit `BUY`, `SELL`, or `HOLD` signals.
 - Cover crossover, warmup, HOLD, and CSV-ingestion behavior with pytest.
 
-## Phase 3 — Risk Management & Guardrails (Active)
+## Phase 3 — Risk Management & Guardrails (Complete)
 
 - Add `src/trading_bot/risk.py` as the pre-trade risk boundary.
 - Enforce position sizing with a maximum configured risk fraction of 1–2%; the existing one-percent execution invariant remains the hard ceiling unless explicitly reviewed.

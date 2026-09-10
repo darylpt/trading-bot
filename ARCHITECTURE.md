@@ -37,6 +37,9 @@ All values below are safe paper/demo defaults. Secrets are injected at runtime o
 | `DATA_DIR` | `data` locally, `/app/data` in Compose | Holds `market_data.csv` and `session_metrics.db`. |
 | `LOG_DIR` | `logs` locally, `/app/logs` in Compose | Operational logs. |
 | `MARKET_DATA_PATH` | unset | Optional OHLCV CSV override; otherwise `DATA_DIR/market_data.csv`. |
+| `ACCOUNT_EQUITY` | unset | Current paper account equity; missing values reject BUY/SELL signals. |
+| `SESSION_START_EQUITY` | unset | Session baseline equity used for drawdown calculation. |
+| `RISK_STOP_DISTANCE` | unset | Positive stop distance used for position sizing; missing values reject BUY/SELL signals. |
 | `SENTIMENT_PROVIDER` | `openai` | Strict JSON sentiment provider. |
 | `OLLAMA_BASE_URL` | unset | Optional local Ollama URL. |
 | `DATABASE_URL` | unset locally | Optional PostgreSQL service URL; SQLite remains the initial persistence path. |
