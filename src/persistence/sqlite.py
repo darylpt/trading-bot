@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,26 @@ class ExecutionLogRecord:
 
 
 @dataclass(frozen=True)
+class PositionRecord:
+    """Persisted paper position lifecycle state."""
+
+    position_id: str
+    client_order_id: str
+    instrument: str
+    direction: Literal["LONG", "SHORT"]
+    quantity: Decimal
+    entry_price: Decimal
+    stop_loss_price: Decimal
+    take_profit_price: Decimal
+    status: Literal["OPEN", "CLOSED"]
+    opened_at: datetime
+    closed_at: datetime | None = None
+    exit_price: Decimal | None = None
+    exit_reason: str | None = None
+    realized_pnl: Decimal = Decimal("0")
+
+
+@dataclass(frozen=True)
 class SessionMetricsRecord:
     """Daily aggregate metrics for forward-test reporting."""
 
@@ -47,6 +68,47 @@ class SessionMetricsRecord:
     broker_latency_samples: int
     news_blackout_hits: int
     updated_at: datetime
+    realized_pnl: Decimal = Decimal("0")
+    closed_trades: int = 0
+    winning_trades: int = 0
+    losing_trades: int = 0
+
+
+def _direction(value: object) -> Literal["LONG", "SHORT"]:
+    direction = str(value)
+    if direction == "LONG":
+        return "LONG"
+    if direction == "SHORT":
+        return "SHORT"
+    raise ValueError("stored position direction is invalid")
+
+
+def _position_status(value: object) -> Literal["OPEN", "CLOSED"]:
+    status = str(value)
+    if status == "OPEN":
+        return "OPEN"
+    if status == "CLOSED":
+        return "CLOSED"
+    raise ValueError("stored position status is invalid")
+
+
+def _position_from_row(row: tuple[object, ...]) -> PositionRecord:
+    return PositionRecord(
+        position_id=str(row[0]),
+        client_order_id=str(row[1]),
+        instrument=str(row[2]),
+        direction=_direction(row[3]),
+        quantity=Decimal(str(row[4])),
+        entry_price=Decimal(str(row[5])),
+        stop_loss_price=Decimal(str(row[6])),
+        take_profit_price=Decimal(str(row[7])),
+        status=_position_status(row[8]),
+        opened_at=datetime.fromisoformat(str(row[9])),
+        closed_at=None if row[10] is None else datetime.fromisoformat(str(row[10])),
+        exit_price=None if row[11] is None else Decimal(str(row[11])),
+        exit_reason=None if row[12] is None else str(row[12]),
+        realized_pnl=Decimal(str(row[13])),
+    )
 
 
 class SQLiteRepository:
@@ -59,9 +121,23 @@ class SQLiteRepository:
         self.initialize_schema()
 
     def initialize_schema(self) -> None:
-        """Create every operational table, including session metrics."""
+        """Create tables and add Phase 4 columns to existing databases."""
         schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         self.connection.executescript(schema)
+        existing_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(session_metrics)")
+        }
+        for name, definition in (
+            ("realized_pnl", "NUMERIC NOT NULL DEFAULT 0"),
+            ("closed_trades", "INTEGER NOT NULL DEFAULT 0"),
+            ("winning_trades", "INTEGER NOT NULL DEFAULT 0"),
+            ("losing_trades", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if name not in existing_columns:
+                self.connection.execute(
+                    f"ALTER TABLE session_metrics ADD COLUMN {name} {definition}"
+                )
         self.connection.commit()
 
     def save_trade(self, record: TradeRecord) -> None:
@@ -119,6 +195,86 @@ class SQLiteRepository:
             rejection_reason=None if row[11] is None else str(row[11]),
         )
 
+    def save_position(self, record: PositionRecord) -> None:
+        """Persist an open paper position idempotently."""
+        self.connection.execute(
+            """INSERT OR IGNORE INTO positions
+               (position_id, client_order_id, instrument, direction, quantity,
+                entry_price, stop_loss_price, take_profit_price, status,
+                opened_at, closed_at, exit_price, exit_reason, realized_pnl)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                record.position_id,
+                record.client_order_id,
+                record.instrument,
+                record.direction,
+                str(record.quantity),
+                str(record.entry_price),
+                str(record.stop_loss_price),
+                str(record.take_profit_price),
+                record.status,
+                record.opened_at.isoformat(),
+                None if record.closed_at is None else record.closed_at.isoformat(),
+                None if record.exit_price is None else str(record.exit_price),
+                record.exit_reason,
+                str(record.realized_pnl),
+            ),
+        )
+        self.connection.commit()
+
+    def get_position(self, position_id: str) -> PositionRecord | None:
+        row = self.connection.execute(
+            """SELECT position_id, client_order_id, instrument, direction, quantity,
+                      entry_price, stop_loss_price, take_profit_price, status,
+                      opened_at, closed_at, exit_price, exit_reason, realized_pnl
+               FROM positions WHERE position_id = ?""",
+            (position_id,),
+        ).fetchone()
+        return None if row is None else _position_from_row(tuple(row))
+
+    def get_open_positions(self, instrument: str | None = None) -> list[PositionRecord]:
+        query = """SELECT position_id, client_order_id, instrument, direction, quantity,
+                          entry_price, stop_loss_price, take_profit_price, status,
+                          opened_at, closed_at, exit_price, exit_reason, realized_pnl
+                   FROM positions WHERE status = 'OPEN'"""
+        parameters: tuple[str, ...] = ()
+        if instrument is not None:
+            query += " AND instrument = ?"
+            parameters = (instrument,)
+        query += " ORDER BY opened_at ASC, position_id ASC"
+        rows = self.connection.execute(query, parameters).fetchall()
+        return [_position_from_row(tuple(row)) for row in rows]
+
+    def close_position(
+        self,
+        position_id: str,
+        *,
+        exit_price: Decimal,
+        exit_reason: str,
+        closed_at: datetime,
+        realized_pnl: Decimal,
+    ) -> PositionRecord:
+        cursor = self.connection.execute(
+            """UPDATE positions
+               SET status = 'CLOSED', closed_at = ?, exit_price = ?,
+                   exit_reason = ?, realized_pnl = ?
+               WHERE position_id = ? AND status = 'OPEN'""",
+            (
+                closed_at.isoformat(),
+                str(exit_price),
+                exit_reason,
+                str(realized_pnl),
+                position_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("position is missing or already closed")
+        self.connection.commit()
+        position = self.get_position(position_id)
+        if position is None:
+            raise RuntimeError("closed position was not persisted")
+        return position
+
     def save_execution_log(self, record: ExecutionLogRecord) -> None:
         """Persist one sanitized execution event."""
         self.connection.execute(
@@ -150,15 +306,24 @@ class SQLiteRepository:
         *,
         broker_latency_ms: int | None = None,
         news_blackout_hit: bool = False,
+        realized_pnl: Decimal = Decimal("0"),
+        trade_closed: bool = False,
+        winning_trade: bool = False,
+        losing_trade: bool = False,
     ) -> None:
-        """Atomically accumulate daily latency and blackout metrics."""
+        """Atomically accumulate latency, P&L, and win/loss metrics."""
         if broker_latency_ms is not None and broker_latency_ms < 0:
             raise ValueError("broker latency must be non-negative")
+        if not realized_pnl.is_finite():
+            raise ValueError("realized P&L must be finite")
+        if winning_trade and losing_trade:
+            raise ValueError("a trade cannot be both winning and losing")
         self.connection.execute(
             """INSERT INTO session_metrics
                (session_date, broker_latency_total_ms, broker_latency_samples,
-                news_blackout_hits, updated_at)
-               VALUES (?, ?, ?, ?, ?)
+                news_blackout_hits, realized_pnl, closed_trades,
+                winning_trades, losing_trades, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(session_date) DO UPDATE SET
                  broker_latency_total_ms =
                    broker_latency_total_ms + excluded.broker_latency_total_ms,
@@ -166,12 +331,20 @@ class SQLiteRepository:
                    broker_latency_samples + excluded.broker_latency_samples,
                  news_blackout_hits =
                    news_blackout_hits + excluded.news_blackout_hits,
+                 realized_pnl = realized_pnl + excluded.realized_pnl,
+                 closed_trades = closed_trades + excluded.closed_trades,
+                 winning_trades = winning_trades + excluded.winning_trades,
+                 losing_trades = losing_trades + excluded.losing_trades,
                  updated_at = excluded.updated_at""",
             (
                 session_date.isoformat(),
                 broker_latency_ms or 0,
                 1 if broker_latency_ms is not None else 0,
                 1 if news_blackout_hit else 0,
+                str(realized_pnl),
+                1 if trade_closed else 0,
+                1 if winning_trade else 0,
+                1 if losing_trade else 0,
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
@@ -181,7 +354,9 @@ class SQLiteRepository:
         """Return the aggregate metrics for one UTC trading session."""
         row = self.connection.execute(
             """SELECT session_date, broker_latency_total_ms,
-                      broker_latency_samples, news_blackout_hits, updated_at
+                      broker_latency_samples, news_blackout_hits,
+                      realized_pnl, closed_trades, winning_trades,
+                      losing_trades, updated_at
                FROM session_metrics WHERE session_date = ?""",
             (session_date.isoformat(),),
         ).fetchone()
@@ -192,7 +367,11 @@ class SQLiteRepository:
             broker_latency_total_ms=int(row[1]),
             broker_latency_samples=int(row[2]),
             news_blackout_hits=int(row[3]),
-            updated_at=datetime.fromisoformat(str(row[4])),
+            realized_pnl=Decimal(str(row[4])),
+            closed_trades=int(row[5]),
+            winning_trades=int(row[6]),
+            losing_trades=int(row[7]),
+            updated_at=datetime.fromisoformat(str(row[8])),
         )
 
     def get_latest_metrics(self, limit: int = 5) -> list[SessionMetricsRecord]:
@@ -201,7 +380,9 @@ class SQLiteRepository:
             raise ValueError("metrics limit must be positive")
         rows = self.connection.execute(
             """SELECT session_date, broker_latency_total_ms,
-                      broker_latency_samples, news_blackout_hits, updated_at
+                      broker_latency_samples, news_blackout_hits,
+                      realized_pnl, closed_trades, winning_trades,
+                      losing_trades, updated_at
                FROM session_metrics
                ORDER BY updated_at DESC, session_date DESC
                LIMIT ?""",
@@ -213,7 +394,11 @@ class SQLiteRepository:
                 broker_latency_total_ms=int(row[1]),
                 broker_latency_samples=int(row[2]),
                 news_blackout_hits=int(row[3]),
-                updated_at=datetime.fromisoformat(str(row[4])),
+                realized_pnl=Decimal(str(row[4])),
+                closed_trades=int(row[5]),
+                winning_trades=int(row[6]),
+                losing_trades=int(row[7]),
+                updated_at=datetime.fromisoformat(str(row[8])),
             )
             for row in rows
         ]

@@ -24,9 +24,10 @@ from persistence.sqlite import (
 )
 from strategy.market_data import MarketDataError, load_csv_candles
 from trading_bot.engine import PipelineConfig
+from trading_bot.execution import PaperExecutionEngine
 from trading_bot.market_data_seed import ensure_default_market_data
-from trading_bot.strategy import Signal, moving_average_signal
 from trading_bot.risk import RiskDecision, evaluate_signal
+from trading_bot.strategy import Signal, moving_average_signal
 
 LOGGER = logging.getLogger(__name__)
 
@@ -121,6 +122,7 @@ def run_tick(
     session_start_equity: Decimal | None = None,
     stop_distance: Decimal | None = None,
     daily_drawdown_limit: Decimal = Decimal("0.05"),
+    execution_engine: PaperExecutionEngine | None = None,
 ) -> SessionMetricsRecord:
     """Fetch data, evaluate strategy and risk, then persist tick metrics."""
     timestamp = current_time or datetime.now(timezone.utc)
@@ -159,6 +161,26 @@ def run_tick(
                 provider="risk",
                 error_class="RiskGuardrail",
                 message=risk_decision.reason,
+            )
+        )
+    active_execution = execution_engine or PaperExecutionEngine(repository)
+    execution_outcome = active_execution.process_tick(
+        candles,
+        signal=signal,
+        risk_decision=risk_decision,
+        account_equity=account_equity,
+        current_time=timestamp,
+    )
+    if execution_outcome.rejection_reason is not None and (
+        risk_decision is None or risk_decision.approved
+    ):
+        repository.save_execution_log(
+            ExecutionLogRecord(
+                client_order_id=f"tick-{timestamp.isoformat()}",
+                event_type="EXECUTION_REJECTED",
+                provider="paper",
+                error_class="PaperExecution",
+                message=execution_outcome.rejection_reason,
             )
         )
 

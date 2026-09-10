@@ -28,15 +28,15 @@ This roadmap is the delivery contract for the paper/demo trading system. Work ad
 - Wire risk approval into `run_tick()` before any order can be considered executable.
 - Record risk rejection reasons in operational logs and metrics.
 
-## Phase 4 — Paper Execution & Position Tracking (Pending)
+## Phase 4 — Paper Execution & Position Tracking (Complete)
 
 - Implement `src/trading_bot/execution.py` for paper-order lifecycle tracking.
 - Track open positions, entry and exit prices, quantity, direction, and execution status.
 - Attach and monitor mandatory Stop Loss and Take Profit levels.
 - Reconcile fills and position state without bypassing the execution gate.
-- Update `session_metrics.db` with position and execution outcomes.
+- Update `session_metrics.db` with position, realized P&L, and win/loss outcomes.
 
-## Phase 5 — Exness MT5 Bridge (Pending)
+## Phase 5 — Exness MT5 Bridge (Active / Next)
 
 - Integrate a reviewed Exness MT5 demo/paper bridge.
 - Stream bid/ask market data through a provider adapter.

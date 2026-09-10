@@ -31,5 +31,26 @@ CREATE TABLE IF NOT EXISTS session_metrics (
     broker_latency_total_ms INTEGER NOT NULL CHECK (broker_latency_total_ms >= 0),
     broker_latency_samples INTEGER NOT NULL CHECK (broker_latency_samples >= 0),
     news_blackout_hits INTEGER NOT NULL CHECK (news_blackout_hits >= 0),
+    realized_pnl NUMERIC NOT NULL DEFAULT 0,
+    closed_trades INTEGER NOT NULL DEFAULT 0 CHECK (closed_trades >= 0),
+    winning_trades INTEGER NOT NULL DEFAULT 0 CHECK (winning_trades >= 0),
+    losing_trades INTEGER NOT NULL DEFAULT 0 CHECK (losing_trades >= 0),
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS positions (
+    position_id TEXT PRIMARY KEY,
+    client_order_id TEXT NOT NULL UNIQUE,
+    instrument TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('LONG', 'SHORT')),
+    quantity NUMERIC NOT NULL CHECK (quantity > 0),
+    entry_price NUMERIC NOT NULL CHECK (entry_price > 0),
+    stop_loss_price NUMERIC NOT NULL CHECK (stop_loss_price > 0),
+    take_profit_price NUMERIC NOT NULL CHECK (take_profit_price > 0),
+    status TEXT NOT NULL CHECK (status IN ('OPEN', 'CLOSED')),
+    opened_at TEXT NOT NULL,
+    closed_at TEXT,
+    exit_price NUMERIC,
+    exit_reason TEXT,
+    realized_pnl NUMERIC NOT NULL DEFAULT 0
 );

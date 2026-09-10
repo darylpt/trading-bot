@@ -15,8 +15,11 @@ def _metrics_payload(metrics: list[SessionMetricsRecord]) -> list[dict[str, obje
         {
             "session_date": metric.session_date.isoformat(),
             "broker_latency_total_ms": metric.broker_latency_total_ms,
-            "broker_latency_samples": metric.broker_latency_samples,
             "news_blackout_hits": metric.news_blackout_hits,
+            "realized_pnl": str(metric.realized_pnl),
+            "closed_trades": metric.closed_trades,
+            "winning_trades": metric.winning_trades,
+            "losing_trades": metric.losing_trades,
             "updated_at": metric.updated_at.isoformat(),
         }
         for metric in metrics

@@ -180,7 +180,7 @@ def test_once_uses_safe_defaults_for_missing_environment(
     repository.close()
 
 
-def test_run_tick_applies_risk_before_order_check(tmp_path: Path) -> None:
+def test_run_tick_opens_risk_approved_paper_position(tmp_path: Path) -> None:
     repository = SQLiteRepository(tmp_path / "session_metrics.db")
 
     application.run_tick(
@@ -192,8 +192,8 @@ def test_run_tick_applies_risk_before_order_check(tmp_path: Path) -> None:
         daily_drawdown_limit=Decimal("0.05"),
     )
 
-    assert repository.execution_log_count() == 0
-    assert len(repository.get_latest_metrics(limit=1)) == 1
+    assert repository.execution_log_count() == 1
+    assert len(repository.get_open_positions()) == 1
     repository.close()
 
 

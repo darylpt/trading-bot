@@ -14,6 +14,7 @@ market data -> strategy signal -> risk approval -> execution gate -> broker adap
 - `src/trading_bot/strategy.py` emits typed `BUY`/`SELL`/`HOLD` crossover signals.
 - `src/sentiment/` validates strict JSON sentiment and news blackout state. Sentiment never submits orders.
 - `src/trading_bot/risk.py` is the Phase 3 pre-trade risk boundary.
+- `src/trading_bot/execution.py` is the Phase 4 paper execution boundary: it fills approved orders, persists positions, evaluates protective and counter-signal exits, and records realized P&L.
 - `src/risk/` contains reusable sizing, ATR exits, and order-risk calculations.
 - `src/execution/` contains broker-neutral payloads, adapters, reconciliation, and the rejecting execution gate.
 - `src/persistence/` owns SQLite schema creation, operational writes, session metrics, and the cross-shell CLI.
@@ -76,6 +77,10 @@ SQLite is initialized idempotently from `src/persistence/schema.sql`.
 
 Stores validated order intents and execution status: client order ID, instrument, direction, quantity, entry, Stop Loss, Take Profit, account equity, risk fraction, environment, rejection reason, and open timestamp.
 
+### `positions`
+
+Stores one paper position lifecycle: position and client order IDs, instrument, direction, quantity, entry, protective exits, open/closed status, timestamps, exit reason, exit price, and realized P&L. The repository only permits an open position to transition to `CLOSED` once.
+
 ### `execution_logs`
 
 Stores sanitized operational events: client order ID, event type, provider, error class, message, latency, slippage, and creation timestamp. Secrets and authorization headers are never persisted.
@@ -88,6 +93,10 @@ Stores one aggregate row per UTC session date:
 - `broker_latency_total_ms`
 - `broker_latency_samples`
 - `news_blackout_hits`
+- `realized_pnl`
+- `closed_trades`
+- `winning_trades`
+- `losing_trades`
 - `updated_at`
 
 `SQLiteRepository` creates all tables on connection and exposes `get_latest_metrics()` for CLI inspection.
