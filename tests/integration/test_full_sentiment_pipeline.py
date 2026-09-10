@@ -97,7 +97,7 @@ def _engine(
     llm: MockSentimentClient,
     gateway: PaperGateway,
 ) -> tuple[TradingEngine, SQLiteRepository]:
-    repository = SQLiteRepository(tmp_path / "trades.sqlite")
+    repository = SQLiteRepository(tmp_path / "session_metrics.db")
     engine = TradingEngine(
         sentiment_client=llm,
         execution_gate=ExecutionGate(gateway, environment="PAPER"),
@@ -142,6 +142,9 @@ def test_full_pipeline_confirms_sizes_dispatches_and_persists(tmp_path: Path) ->
     assert len(gateway.payloads) == 1
     assert repository.trade_count() == 1
     assert repository.execution_log_count() == 1
+    latest_metrics = repository.get_latest_metrics(limit=1)
+    assert len(latest_metrics) == 1
+    assert latest_metrics[0].session_date == fixture.current_time.date()
     repository.close()
 
 

@@ -56,6 +56,10 @@ class SQLiteRepository:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.path)
+        self.initialize_schema()
+
+    def initialize_schema(self) -> None:
+        """Create every operational table, including session metrics."""
         schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         self.connection.executescript(schema)
         self.connection.commit()
@@ -190,6 +194,29 @@ class SQLiteRepository:
             news_blackout_hits=int(row[3]),
             updated_at=datetime.fromisoformat(str(row[4])),
         )
+
+    def get_latest_metrics(self, limit: int = 5) -> list[SessionMetricsRecord]:
+        """Return the most recently updated daily metric aggregates."""
+        if limit <= 0:
+            raise ValueError("metrics limit must be positive")
+        rows = self.connection.execute(
+            """SELECT session_date, broker_latency_total_ms,
+                      broker_latency_samples, news_blackout_hits, updated_at
+               FROM session_metrics
+               ORDER BY updated_at DESC, session_date DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [
+            SessionMetricsRecord(
+                session_date=date.fromisoformat(str(row[0])),
+                broker_latency_total_ms=int(row[1]),
+                broker_latency_samples=int(row[2]),
+                news_blackout_hits=int(row[3]),
+                updated_at=datetime.fromisoformat(str(row[4])),
+            )
+            for row in rows
+        ]
 
     def close(self) -> None:
         self.connection.close()

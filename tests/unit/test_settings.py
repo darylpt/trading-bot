@@ -27,6 +27,17 @@ def test_settings_require_safe_demo_mode(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.daily_drawdown_limit == Decimal("0.02")
 
 
+def test_settings_allow_missing_broker_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env(monkeypatch)
+    monkeypatch.delenv("BROKER_ENDPOINT")
+
+    settings = Settings()
+
+    assert settings.broker_endpoint is None
+
+
 def test_settings_reject_live_mode_and_non_demo_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

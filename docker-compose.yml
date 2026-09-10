@@ -3,15 +3,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    env_file:
+      - .env
     environment:
       PYTHONUNBUFFERED: "1"
-      PAPER_TRADING: "true"
-      LIVE_TRADING: "false"
-      BROKER_ENV: "demo"
-      BROKER_PROVIDER: "oanda"
-      BROKER_ENDPOINT: "https://api-fxpractice.oanda.com"
-      BROKER_TOKEN: ${BROKER_TOKEN:?BROKER_TOKEN must be set in .env}
-      DAILY_DRAWDOWN_LIMIT: "0.02"
+      PAPER_TRADING: "${PAPER_TRADING:-true}"
+      LIVE_TRADING: "${LIVE_TRADING:-false}"
+      BROKER_ENV: "${BROKER_ENV:-demo}"
+      BROKER_PROVIDER: "${BROKER_PROVIDER:-mt5}"
+      BROKER_ACCOUNT_ID: "${BROKER_ACCOUNT_ID}"
+      BROKER_TOKEN: "${BROKER_TOKEN}"
+      BROKER_SERVER: "${BROKER_SERVER}"
+      DAILY_DRAWDOWN_LIMIT: "${DAILY_DRAWDOWN_LIMIT:-0.05}"
       DATA_DIR: /app/data
       LOG_DIR: /app/logs
     volumes:
@@ -41,15 +44,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    env_file:
+      - .env
     environment:
       PYTHONUNBUFFERED: "1"
-      PAPER_TRADING: "true"
-      LIVE_TRADING: "false"
-      BROKER_ENV: "demo"
-      BROKER_PROVIDER: "oanda"
-      BROKER_ENDPOINT: "https://api-fxpractice.oanda.com"
-      BROKER_TOKEN: ${BROKER_TOKEN:?BROKER_TOKEN must be set in .env}
-      DAILY_DRAWDOWN_LIMIT: "0.02"
+      PAPER_TRADING: "${PAPER_TRADING:-true}"
+      LIVE_TRADING: "${LIVE_TRADING:-false}"
+      BROKER_ENV: "${BROKER_ENV:-demo}"
+      BROKER_PROVIDER: "${BROKER_PROVIDER:-mt5}"
+      BROKER_ACCOUNT_ID: "${BROKER_ACCOUNT_ID}"
+      BROKER_TOKEN: "${BROKER_TOKEN}"
+      BROKER_SERVER: "${BROKER_SERVER}"
+      DAILY_DRAWDOWN_LIMIT: "${DAILY_DRAWDOWN_LIMIT:-0.05}"
       DATA_DIR: /tmp/trading-bot-data
       LOG_DIR: /tmp/trading-bot-logs
     logging:

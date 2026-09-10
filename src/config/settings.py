@@ -25,7 +25,9 @@ class Settings(BaseSettings):
     paper_trading: bool = Field(validation_alias="PAPER_TRADING")
     live_trading: bool = Field(validation_alias="LIVE_TRADING")
     broker_environment: Literal["paper", "demo"] = Field(validation_alias="BROKER_ENV")
-    broker_endpoint: AnyHttpUrl = Field(validation_alias="BROKER_ENDPOINT")
+    broker_endpoint: AnyHttpUrl | None = Field(
+        default=None, validation_alias="BROKER_ENDPOINT"
+    )
     daily_drawdown_limit: Decimal = Field(
         validation_alias="DAILY_DRAWDOWN_LIMIT", gt=Decimal("0"), le=Decimal("1")
     )
@@ -53,13 +55,15 @@ class Settings(BaseSettings):
             )
         if self.broker_environment not in {"paper", "demo"}:
             raise ValueError("broker environment must be paper or demo")
-        hostname = (urlparse(str(self.broker_endpoint)).hostname or "").lower()
-        if not any(
-            marker in hostname for marker in ("practice", "demo", "paper", "localhost")
-        ):
-            raise ValueError(
-                "broker endpoint must be a demo, practice, paper, or localhost endpoint"
-            )
+        if self.broker_endpoint is not None:
+            hostname = (urlparse(str(self.broker_endpoint)).hostname or "").lower()
+            if not any(
+                marker in hostname
+                for marker in ("practice", "demo", "paper", "localhost")
+            ):
+                raise ValueError(
+                    "broker endpoint must be a demo, practice, paper, or localhost endpoint"
+                )
         if self.daily_drawdown_limit <= 0:
             raise ValueError("daily drawdown limit must be positive")
         return self
