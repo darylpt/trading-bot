@@ -1,0 +1,1 @@
+"""Credential-safe operational observability."""

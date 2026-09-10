@@ -1,0 +1,41 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Local data, logs, and databases
+data/*
+logs/*
+*.db
+*.sqlite
+*.sqlite3
+
+# Test and coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
+pytest.xml
+junit.xml
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDE and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

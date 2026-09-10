@@ -1,0 +1,48 @@
+# Version control and local environment
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Test and coverage artifacts
+.coverage
+coverage.xml
+htmlcov
+pytest.xml
+junit.xml
+
+# Local data, logs, and databases
+data/*
+logs/*
+*.db
+*.sqlite
+*.sqlite3
+
+# Build and packaging artifacts
+build
+dist
+*.egg-info
+.eggs
+
+# IDE and OS metadata
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Docker overrides and temporary files
+docker-compose.override.yml
+*.tmp
+*.temp

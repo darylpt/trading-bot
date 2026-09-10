@@ -1,0 +1,1 @@
+"""Single broker submission boundary."""
