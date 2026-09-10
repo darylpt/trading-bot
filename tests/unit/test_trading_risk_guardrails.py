@@ -75,3 +75,26 @@ def test_risk_rejects_risk_fraction_above_one_percent() -> None:
 
     assert decision.approved is False
     assert decision.reason == "RISK_FRACTION_EXCEEDS_ONE_PERCENT"
+
+
+def test_risk_rejects_non_positive_entry_and_stop_prices() -> None:
+    invalid_entry = Signal(
+        action="BUY",
+        timestamp=datetime(2026, 1, 5, tzinfo=timezone.utc),
+        reference_price=Decimal("0"),
+    )
+    entry_decision = evaluate_signal(
+        invalid_entry,
+        account_equity=Decimal("10000"),
+        session_start_equity=Decimal("10000"),
+        stop_distance=Decimal("0.0100"),
+    )
+    assert entry_decision.reason == "ENTRY_PRICE_INVALID"
+
+    stop_decision = evaluate_signal(
+        signal(),
+        account_equity=Decimal("10000"),
+        session_start_equity=Decimal("10000"),
+        stop_distance=Decimal("2"),
+    )
+    assert stop_decision.reason == "STOP_LOSS_INVALID"

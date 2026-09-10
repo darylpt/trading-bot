@@ -50,6 +50,8 @@ def evaluate_signal(
     """Approve a signal only when equity, drawdown, exits, and size are valid."""
     if signal.action == "HOLD":
         return _rejected("HOLD_SIGNAL")
+    if signal.action not in {"BUY", "SELL"}:
+        return _rejected("INVALID_SIGNAL_ACTION")
     if not daily_drawdown_limit.is_finite() or not (
         Decimal("0") < daily_drawdown_limit <= Decimal("1")
     ):
@@ -76,6 +78,8 @@ def evaluate_signal(
         )
     if signal.reference_price is None or not signal.reference_price.is_finite():
         return _rejected("ENTRY_PRICE_UNAVAILABLE", drawdown_fraction=drawdown_fraction)
+    if signal.reference_price <= 0:
+        return _rejected("ENTRY_PRICE_INVALID", drawdown_fraction=drawdown_fraction)
     if stop_distance is None or not stop_distance.is_finite() or stop_distance <= 0:
         return _rejected("STOP_DISTANCE_INVALID", drawdown_fraction=drawdown_fraction)
 
@@ -84,6 +88,8 @@ def evaluate_signal(
         if signal.action == "BUY"
         else signal.reference_price + stop_distance
     )
+    if stop_loss_price <= 0:
+        return _rejected("STOP_LOSS_INVALID", drawdown_fraction=drawdown_fraction)
     try:
         position_size = calculate_position_size(
             account_equity=account_equity,
