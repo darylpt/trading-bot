@@ -43,3 +43,7 @@ def test_validate_candles_rejects_gaps_and_insufficient_history() -> None:
         validate_candles([candle(0), candle(2)])
     with pytest.raises(MarketDataError):
         validate_candles([candle(0)], minimum_history=2)
+
+
+def test_validate_candles_allows_explicit_broker_session_gaps() -> None:
+    assert len(validate_candles([candle(0), candle(2)], allow_gaps=True)) == 2

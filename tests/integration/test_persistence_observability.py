@@ -139,6 +139,7 @@ def test_application_once_runs_tick_and_exits_without_sleep(
     monkeypatch.setenv("DAILY_DRAWDOWN_LIMIT", "0.02")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.delenv("MARKET_DATA_PATH", raising=False)
+    monkeypatch.setenv("MAX_DATA_AGE_SECONDS", "999999999")
 
     def unexpected_sleep(_: float) -> None:
         raise AssertionError("--once must not enter the sleep loop")
@@ -192,7 +193,7 @@ def test_run_tick_opens_risk_approved_paper_position(tmp_path: Path) -> None:
         daily_drawdown_limit=Decimal("0.05"),
     )
 
-    assert repository.execution_log_count() == 1
+    assert repository.execution_log_count() == 2
     assert len(repository.get_open_positions()) == 1
     repository.close()
 

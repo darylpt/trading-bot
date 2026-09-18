@@ -9,6 +9,10 @@ Here is a production-ready **`CONTEXT.md`** file summarizing the discussion, tec
 
 This document serves as the persistent context memory for developers, collaborators, and AI coding agents (Cursor, Claude Code, Copilot) working in this workspace.
 
+## Persistent readiness and SDD references
+
+For any session involving broker connectivity, market data, paper/demo execution, risk, sentiment, persistence, observability, Docker runtime, readiness, or project planning, read `TODO.md`, `docs/PHASE-0-SECURE-BASELINE-SPEC.md`, `docs/PAPER-TRADING-READINESS.md`, and `docs/SPEC-DRIVEN-DEVELOPMENT.md` after this context file and `AGENTS.md`. They are the canonical Phase 0 contract, readiness checklist, acceptance contract, implementation workflow, and persistent task queue. Every non-trivial change requires a defined contract and verification evidence. The system MUST NOT be described as broker-connected paper trading until its demo connectivity, execution, reconciliation, and forward-test gates pass.
+
 ---
 
 ## 1. Executive Summary & Goals
@@ -29,7 +33,7 @@ This document serves as the persistent context memory for developers, collaborat
 | **Execution Framework** | Backtrader / Freqtrade | Time-series backtesting, event loops, dry-run paper trading. |
 | **Market Data Processing** | `pandas`, `numpy`, `pandas-ta` | Technical indicator calculations (RSI, Moving Averages, ATR). |
 | **Qualitative / AI Layer** | OpenAI API (`gpt-4o-mini`) / Ollama | News headline analysis and structured JSON sentiment scoring. |
-| **Broker Integration** | OANDA v20 REST API / MetaTrader 5 | Paper trading execution, WebSocket live price streams. |
+| **Broker Integration** | Exness MT5 | Demo/live-boundary broker adapter; local paper testing uses `SimulatedBroker`. |
 | **Project Configuration** | `.env` + `pydantic-settings` | Secure API key storage and environment management. |
 | **Container Runtime** | Docker / Docker Compose | Isolated, reproducible development, testing, and continuous background execution. |
 | **Base Image** | Python 3.11-slim | Minimal, deterministic runtime image for the strategy engine and workers. |
@@ -41,7 +45,7 @@ This document serves as the persistent context memory for developers, collaborat
 ```
 
 [ Financial News Feeds ]                 [ Market Price Feeds (OHLC) ]
-(News API / Forex Factory)                    (OANDA / MT5 WebSocket)
+(News API / Forex Factory)                    (Exness MT5 demo)
 │                                            │
 ▼                                            ▼
 ┌──────────────────────────┐                ┌──────────────────────────┐
@@ -96,21 +100,18 @@ This document serves as the persistent context memory for developers, collaborat
 
 ## 5. Phased Implementation Roadmap
 
-* [x] **Phase 0: Environment & Architecture Setup**
-  * Establish workspace configuration (`AGENTS.md` / `.cursorrules`).
-  * Set up virtual environment and core dependencies (`backtrader`, `pandas`, `openai`).
-* [ ] **Phase 1: Backtesting Foundation**
-  * Load historical 15m EUR/USD candle data from CSV.
-  * Build technical indicator strategy (RSI + Moving Average Crossover).
-* [ ] **Phase 2: Custom Risk Engine**
-  * Implement dynamic lot-sizing calculator.
-  * Implement Average True Range (ATR) based trailing stop-losses.
-* [ ] **Phase 3: LLM Sentiment Integration**
-  * Build news fetcher module (Financial news headlines API).
-  * Build OpenAI / Ollama structured JSON prompt classifier.
-* [ ] **Phase 4: Paper Trading Pipeline**
-  * Connect strategy engine to OANDA / MT5 Demo API.
-  * Log execution metrics, slippage, and latency errors to SQLite database.
+The active phase status and delivery contract are maintained in `ROADMAP.md`. The canonical Phase 0 contract is `docs/PHASE-0-SECURE-BASELINE-SPEC.md`; broker-demo readiness is `docs/PAPER-TRADING-READINESS.md`; and the implementation workflow is `docs/SPEC-DRIVEN-DEVELOPMENT.md`.
+
+Current status:
+
+| Phase | Status | Scope |
+| --- | --- | --- |
+| Phase 0 | Implemented locally / unverified | Secure baseline, explicit modes, credential hygiene, documentation reconciliation, reproducible local simulation, and recorded local evidence in `docs/PHASE-0-BASELINE-MANIFEST.md`. |
+| Phases 1–4 | Complete locally / evidence limited to documented checks | Strategy, risk, sentiment, and local `SimulatedBroker` paper execution. |
+| Phase 5 | Not complete | Broker-connected Exness MT5 demo lifecycle. |
+| Phases 6–7 | Not complete | Operational hardening and controlled forward test. |
+
+The local simulated quote/paper-fill path is not evidence of broker connectivity.
 
 ---
 

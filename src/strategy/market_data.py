@@ -48,7 +48,10 @@ def _parse_timestamp(value: str) -> datetime:
 
 
 def validate_candles(
-    candles: Sequence[MarketCandle], *, minimum_history: int = 1
+    candles: Sequence[MarketCandle],
+    *,
+    minimum_history: int = 1,
+    allow_gaps: bool = False,
 ) -> tuple[MarketCandle, ...]:
     """Validate chronology, timeframe spacing, and available history."""
     if len(candles) < minimum_history:
@@ -64,7 +67,7 @@ def validate_candles(
             raise MarketDataError("all candles must share instrument and timeframe")
         if current.timestamp <= previous.timestamp:
             raise MarketDataError("candles must be chronological")
-        if current.timestamp - previous.timestamp != expected:
+        if not allow_gaps and current.timestamp - previous.timestamp != expected:
             raise MarketDataError("market-data gap detected")
     return tuple(candles)
 
@@ -75,6 +78,7 @@ def load_csv_candles(
     instrument: str = "EUR_USD",
     timeframe: Literal["15m", "1h"] = "15m",
     minimum_history: int = 1,
+    allow_gaps: bool = False,
 ) -> tuple[MarketCandle, ...]:
     """Load typed OHLC records from a CSV with timestamp/OHLC headers."""
     if timeframe not in {"15m", "1h"}:
@@ -107,4 +111,6 @@ def load_csv_candles(
                 )
     except OSError as exc:
         raise MarketDataError(f"unable to read market data: {path}") from exc
-    return validate_candles(rows, minimum_history=minimum_history)
+    return validate_candles(
+        rows, minimum_history=minimum_history, allow_gaps=allow_gaps
+    )

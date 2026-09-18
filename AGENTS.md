@@ -2,13 +2,17 @@
 
 This repository is a production-oriented hybrid algorithmic and AI Forex trading system. These rules apply to every human and AI change. Preserve the safety invariants below even when adding new strategies, brokers, data sources, or LLM providers.
 
+## Persistent paper-trading and SDD references
+
+Before any new session performs work involving broker connectivity, market data, paper/demo execution, risk, sentiment, persistence, observability, Docker runtime, readiness, or project planning, read `TODO.md`, `docs/PHASE-0-SECURE-BASELINE-SPEC.md`, `docs/PAPER-TRADING-READINESS.md`, and `docs/SPEC-DRIVEN-DEVELOPMENT.md` in addition to this file and `CONTEXT.md`. Treat those documents as the canonical Phase 0 contract, readiness checklist, acceptance contract, workflow, and task queue. Every non-trivial change MUST define its contract and evidence before implementation. Do not describe the system as broker-connected paper trading until its verification gates pass.
+
 ## 1. Stack and environment
 
 - **Python:** 3.11 or newer. Use the repository virtual environment for every command.
 - **Trading engine:** Backtrader or Freqtrade for backtesting, event loops, and dry-run paper trading.
 - **Market data:** `pandas`, `numpy`, and `pandas-ta` for OHLC data and indicators such as RSI, moving averages, and ATR.
 - **LLM layer:** OpenAI (`gpt-4o-mini`) or Ollama for news analysis. LLM output is structured data, never strategy instructions or free-form text.
-- **Broker adapters:** OANDA v20 REST API or MetaTrader 5, initially against demo/paper accounts only.
+- **Broker adapter:** Exness MT5 is the primary demo target, behind the standard `BaseBroker` abstraction; `SimulatedBroker` is the local paper implementation. Do not add OANDA code.
 - **Configuration:** `.env` loaded through `pydantic-settings`. Secrets belong in environment variables, not source code.
 - **Validation and quality:** Type hints throughout; `mypy` for static typing; Pydantic models for all external and LLM payloads; `pytest` for tests; Ruff for linting and formatting when configured.
 - **Container runtime:** Docker and Docker Compose for isolated builds, deterministic native dependencies, and continuous background execution.

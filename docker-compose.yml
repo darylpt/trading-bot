@@ -9,15 +9,24 @@ services:
       PYTHONUNBUFFERED: "1"
       PAPER_TRADING: "${PAPER_TRADING:-true}"
       LIVE_TRADING: "${LIVE_TRADING:-false}"
+      TRADING_MODE: "${TRADING_MODE:-SIMULATED}"
       BROKER_ENV: "${BROKER_ENV:-demo}"
-      BROKER_PROVIDER: "${BROKER_PROVIDER:-mt5}"
+      BROKER_PROVIDER: "${BROKER_PROVIDER:-exness_mt5}"
       BROKER_ACCOUNT: "${BROKER_ACCOUNT:-}"
-      BROKER_ACCOUNT_ID: "${BROKER_ACCOUNT_ID}"
-      BROKER_SERVER: "${BROKER_SERVER}"
-      BROKER_TOKEN: "${BROKER_TOKEN}"
-      DAILY_DRAWDOWN_LIMIT: "${DAILY_DRAWDOWN_LIMIT:-0.05}"
+      BROKER_ACCOUNT_ID: "${BROKER_ACCOUNT_ID:-}"
+      BROKER_SERVER: "${BROKER_SERVER:-}"
+      BROKER_TOKEN: "${BROKER_TOKEN:-}"
+      INSTRUMENT: "${INSTRUMENT:-XAUUSDm}"
+      EXNESS_BRIDGE_HOST: "${EXNESS_BRIDGE_HOST:-host.docker.internal}"
+      EXNESS_BRIDGE_PORT: "${EXNESS_BRIDGE_PORT:-18812}"
+      EXNESS_SERVER: "${EXNESS_SERVER:-}"
+      EXNESS_LOGIN: "${EXNESS_LOGIN:-}"
+      EXNESS_PASSWORD: "${EXNESS_PASSWORD:-}"
+      DAILY_DRAWDOWN_LIMIT: "${DAILY_DRAWDOWN_LIMIT:-0.01}"
       DATA_DIR: /app/data
       LOG_DIR: /app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./src:/app/src
       - ./tests:/app/tests
@@ -45,18 +54,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    env_file:
-      - .env
     environment:
       PYTHONUNBUFFERED: "1"
       PAPER_TRADING: "${PAPER_TRADING:-true}"
       LIVE_TRADING: "${LIVE_TRADING:-false}"
-      BROKER_ACCOUNT: "${BROKER_ACCOUNT:-}"
-      BROKER_ACCOUNT_ID: "${BROKER_ACCOUNT_ID}"
-      BROKER_SERVER: "${BROKER_SERVER}"
-      BROKER_TOKEN: "${BROKER_TOKEN}"
-      DAILY_DRAWDOWN_LIMIT: "${DAILY_DRAWDOWN_LIMIT:-0.05}"
-      DATA_DIR: /tmp/trading-bot-data
+      INSTRUMENT: "${INSTRUMENT:-XAUUSDm}"
+      DAILY_DRAWDOWN_LIMIT: "${DAILY_DRAWDOWN_LIMIT:-0.01}"
       LOG_DIR: /tmp/trading-bot-logs
     logging:
       driver: json-file
@@ -66,6 +69,32 @@ services:
     profiles:
       - test
     command: ["pytest", "-q"]
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DASHBOARD_DATABASE_PATH: /app/data/session_metrics.db
+      TRADING_MODE: "SIMULATED"
+      STREAMLIT_SERVER_HEADLESS: "true"
+      STREAMLIT_SERVER_ADDRESS: 127.0.0.1
+      STREAMLIT_SERVER_PORT: "8501"
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - bot_data:/app/data
+    command:
+      [
+        "streamlit",
+        "run",
+        "src/trading_bot/ui/app.py",
+        "--server.address=127.0.0.1",
+        "--server.port=8501",
+      ]
+    depends_on:
+      - app
+    restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine

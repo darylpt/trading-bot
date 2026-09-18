@@ -1,4 +1,4 @@
-"""Fail-closed OANDA/MT5 demo broker communication adapters."""
+"""Fail-closed Exness MT5 demo broker communication adapter."""
 
 from __future__ import annotations
 
@@ -10,15 +10,25 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol, runtime_checkable
 from urllib.error import HTTPError
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from domain.models import BrokerOrderPayload, Direction, ExecutionResult
+from trading_bot.config import DEMO_BRIDGE_HOSTS
+from domain.models import BrokerOrderPayload, Direction, ExecutionResult, MarketCandle
 
-Provider = Literal["oanda", "mt5"]
+Provider = Literal["exness_mt5"]
 Environment = Literal["PAPER", "DEMO"]
-ExecutionStatus = Literal["ACCEPTED", "REJECTED", "UNKNOWN"]
+ExecutionStatus = Literal[
+    "ACCEPTED",
+    "FILLED",
+    "PARTIALLY_FILLED",
+    "REJECTED",
+    "CANCELLED",
+    "EXPIRED",
+    "UNKNOWN",
+]
 
 
 class BrokerConnectionError(ConnectionError):
@@ -38,6 +48,7 @@ class OpenPosition(BaseModel):
     direction: Direction
     quantity: Decimal = Field(gt=0)
     entry_price: Decimal = Field(gt=0)
+    position_id: str | None = None
 
 
 class BrokerAccountState(BaseModel):
@@ -69,6 +80,34 @@ class MarketQuote(BaseModel):
         if self.ask <= self.bid:
             raise ValueError("broker quote ask must exceed bid")
         return self.ask - self.bid
+
+
+class InstrumentMetadata(BaseModel):
+    """Executable quantity, price, and protection constraints."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    instrument: str = Field(min_length=1)
+    contract_size: Decimal = Field(gt=0)
+    tick_size: Decimal = Field(gt=0)
+    tick_value: Decimal = Field(gt=0)
+    quantity_step: Decimal = Field(gt=0)
+    minimum_quantity: Decimal = Field(gt=0)
+    maximum_quantity: Decimal | None = Field(default=None, gt=0)
+    stop_level: Decimal = Field(ge=0)
+    freeze_level: Decimal = Field(ge=0)
+    precision: int = Field(ge=0, le=18)
+    captured_at: datetime
+
+
+class TradingSession(BaseModel):
+    """Current instrument session state returned by the provider."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    instrument: str = Field(min_length=1)
+    is_open: bool
+    captured_at: datetime
 
 
 @runtime_checkable
@@ -122,8 +161,8 @@ class BrokerResponse(Protocol):
     def json(self) -> object: ...
 
 
-class BrokerAdapter:
-    """Provider-neutral adapter restricted to paper/demo broker endpoints."""
+class BaseBroker:
+    """Standard broker abstraction restricted to paper/demo environments."""
 
     _TRANSIENT_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
@@ -140,22 +179,36 @@ class BrokerAdapter:
         max_attempts: int = 3,
         backoff_seconds: float = 0.25,
         stale_after_seconds: float = 30.0,
+        future_tolerance_seconds: float = 0.0,
         now: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
         if environment not in {"PAPER", "DEMO"}:
             raise ValueError("broker adapter only supports paper/demo environments")
-        if not any(
-            marker in base_url.lower()
-            for marker in ("practice", "demo", "paper", "localhost", "127.0.0.1")
+        parsed = urlparse(base_url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        if (
+            parsed.scheme != "https"
+            or parsed.username is not None
+            or parsed.password is not None
+            or not (
+                parsed.port in {None, 443}
+                or (hostname in DEMO_BRIDGE_HOSTS and parsed.port is not None)
+            )
+            or hostname not in {"demo.exness-mt5.local", *DEMO_BRIDGE_HOSTS}
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
         ):
-            raise ValueError("broker endpoint must be a demo or practice endpoint")
+            raise ValueError("endpoint is not an allowlisted HTTPS demo endpoint")
         if not account_id:
-            raise ValueError("account_id must not be empty")
+            raise ValueError("account is missing")
         if timeout_seconds <= 0 or max_attempts <= 0 or backoff_seconds < 0:
             raise ValueError("broker retry settings are invalid")
         if stale_after_seconds <= 0:
             raise ValueError("stale_after_seconds must be positive")
+        if future_tolerance_seconds < 0:
+            raise ValueError("future_tolerance_seconds must not be negative")
         self.transport = transport
         self.provider = provider
         self.base_url = base_url.rstrip("/")
@@ -165,6 +218,7 @@ class BrokerAdapter:
         self.timeout_seconds = timeout_seconds
         self.max_attempts = max_attempts
         self.backoff_seconds = backoff_seconds
+        self.future_tolerance_seconds = future_tolerance_seconds
         self.stale_after_seconds = stale_after_seconds
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._sleep = sleep or time.sleep
@@ -200,6 +254,141 @@ class BrokerAdapter:
         """Compatibility alias for account polling."""
         return self.get_account_snapshot()
 
+    def get_instrument_metadata(self, instrument: str) -> InstrumentMetadata:
+        """Read broker quantity, price, and protection constraints."""
+        if not instrument:
+            raise ValueError("instrument must not be empty")
+        payload = self._request(
+            "GET", self._instrument_path(instrument), safe_read=True
+        )
+        try:
+            instrument_field = payload.get("instrument")
+            raw = _mapping(
+                instrument_field if isinstance(instrument_field, Mapping) else payload
+            )
+            return InstrumentMetadata(
+                instrument=_optional_text(raw.get("instrument", raw.get("symbol")))
+                or instrument,
+                contract_size=_decimal(
+                    _first_value(raw, "contractSize", "contract_size"),
+                    "contract size",
+                ),
+                tick_size=_decimal(
+                    _first_value(raw, "tickSize", "tick_size"),
+                    "tick size",
+                ),
+                tick_value=_decimal(
+                    _first_value(raw, "tickValue", "tick_value"),
+                    "tick value",
+                ),
+                quantity_step=_decimal(
+                    _first_value(raw, "quantityStep", "volumeStep", "quantity_step"),
+                    "quantity step",
+                ),
+                minimum_quantity=_decimal(
+                    _first_value(raw, "minimumQuantity", "volumeMin", "min_quantity"),
+                    "minimum quantity",
+                ),
+                maximum_quantity=(
+                    None
+                    if _first_value(raw, "maximumQuantity", "volumeMax", "max_quantity")
+                    is None
+                    else _decimal(
+                        _first_value(
+                            raw, "maximumQuantity", "volumeMax", "max_quantity"
+                        ),
+                        "maximum quantity",
+                    )
+                ),
+                stop_level=_decimal(
+                    _first_value(raw, "stopLevel", "stopsLevel", "stop_level"),
+                    "stop level",
+                ),
+                freeze_level=_decimal(
+                    _first_value(raw, "freezeLevel", "freeze_level"),
+                    "freeze level",
+                ),
+                precision=_integer(
+                    _first_value(raw, "precision", "digits"), "precision"
+                ),
+                captured_at=self._timestamp(
+                    _first_value(raw, "timestamp", "time") or self._now()
+                ),
+            )
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise BrokerConnectionError(
+                "broker instrument metadata response was invalid"
+            ) from exc
+
+    def get_trading_session(self, instrument: str) -> TradingSession:
+        """Read whether the instrument is currently tradeable."""
+        payload = self._request("GET", self._session_path(instrument), safe_read=True)
+        try:
+            raw = _mapping(payload.get("session", payload))
+            status = _first_value(raw, "isOpen", "open", "tradeable")
+            if not isinstance(status, bool):
+                raise ValueError("session status must be boolean")
+            return TradingSession(
+                instrument=_optional_text(raw.get("instrument", raw.get("symbol")))
+                or instrument,
+                is_open=status,
+                captured_at=self._timestamp(
+                    _first_value(raw, "timestamp", "time") or self._now()
+                ),
+            )
+        except (TypeError, ValueError) as exc:
+            raise BrokerConnectionError(
+                "broker trading-session response was invalid"
+            ) from exc
+
+    def get_historical_candles(
+        self,
+        instrument: str,
+        *,
+        timeframe: Literal["15m", "1h"] = "15m",
+        limit: int = 256,
+    ) -> tuple[MarketCandle, ...]:
+        """Backfill typed broker candles for strategy warm-up."""
+        if not instrument or timeframe not in {"15m", "1h"} or limit <= 0:
+            raise ValueError("historical candle request is invalid")
+        payload = self._request(
+            "GET",
+            self._history_path(instrument, timeframe=timeframe, limit=limit),
+            safe_read=True,
+        )
+        try:
+            rows = payload.get("candles", payload.get("bars"))
+            if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+                raise ValueError("historical candles must be a sequence")
+            candles = tuple(
+                MarketCandle(
+                    instrument=_optional_text(row.get("instrument", row.get("symbol")))
+                    or instrument,
+                    timeframe=timeframe,
+                    timestamp=self._timestamp(
+                        _first_value(row, "timestamp", "time", "datetime")
+                    ),
+                    open=_decimal(_first_value(row, "open", "o"), "open"),
+                    high=_decimal(_first_value(row, "high", "h"), "high"),
+                    low=_decimal(_first_value(row, "low", "l"), "low"),
+                    close=_decimal(_first_value(row, "close", "c"), "close"),
+                    volume=(
+                        None
+                        if _first_value(row, "volume", "v") is None
+                        else _decimal(_first_value(row, "volume", "v"), "volume")
+                    ),
+                )
+                for value in rows
+                for row in (_mapping(value),)
+            )
+            if not candles:
+                raise ValueError("historical candles are empty")
+            return candles
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise BrokerConnectionError(
+                "broker historical candle response was invalid"
+            ) from exc
+
     def get_market_quote(self, instrument: str) -> MarketQuote:
         """Poll bid/ask data and reject quotes older than 30 seconds."""
         if not instrument:
@@ -208,7 +397,7 @@ class BrokerAdapter:
         try:
             quote = self._parse_quote(payload, instrument)
             age = (self._utc(self._now()) - quote.observed_at).total_seconds()
-            if age < 0 or age > self.stale_after_seconds:
+            if age < -self.future_tolerance_seconds or age > self.stale_after_seconds:
                 raise StaleMarketDataError(
                     f"market quote for {instrument} is stale or from the future"
                 )
@@ -228,9 +417,13 @@ class BrokerAdapter:
         started = time.perf_counter()
         body = self._order_body(payload)
         response = self._request(
-            "POST", self._orders_path(), body=body, safe_read=False
+            "POST",
+            self._orders_path(),
+            body=body,
+            safe_read=False,
+            idempotency_key=payload.client_order_id,
         )
-        latency_ms = int((time.perf_counter() - started) * 1000)
+        latency_ms = round((time.perf_counter() - started) * 1000)
         try:
             provider_order_id = _required_text(
                 _first_value(
@@ -247,7 +440,14 @@ class BrokerAdapter:
                 client_order_id=payload.client_order_id,
                 provider_order_id=provider_order_id,
                 status=status,
+                filled_quantity=_optional_decimal(
+                    _first_value(response, "filledQuantity", "filled_volume")
+                ),
+                fill_price=_optional_decimal(
+                    _first_value(response, "fillPrice", "averagePrice")
+                ),
                 latency_ms=latency_ms,
+                protection_confirmed=_protection_confirmation(response),
                 environment=payload.environment,
                 rejection_reason=_optional_text(response.get("errorMessage")),
             )
@@ -271,6 +471,45 @@ class BrokerAdapter:
             environment=self.environment,
         )
 
+    def close_position(self, position: OpenPosition) -> ExecutionResult:
+        """Close one identified broker position without retrying."""
+        if not position.position_id:
+            raise BrokerConnectionError("broker position id is unavailable")
+        response = self._request(
+            "POST",
+            self._position_close_path(position.position_id),
+            body={
+                "symbol": position.instrument,
+                "volume": str(position.quantity),
+                "type": "ORDER_TYPE_SELL"
+                if position.direction == "LONG"
+                else "ORDER_TYPE_BUY",
+                "environment": self.environment,
+            },
+            safe_read=False,
+            idempotency_key=f"close-{position.position_id}",
+        )
+        try:
+            return ExecutionResult(
+                client_order_id=f"close-{position.position_id}",
+                provider_order_id=_required_text(
+                    _first_value(response, "order", "orderId", "id"),
+                    "close order id",
+                ),
+                status=_execution_status(response.get("status", "UNKNOWN")),
+                filled_quantity=_optional_decimal(
+                    _first_value(response, "filledQuantity", "filled_volume")
+                ),
+                fill_price=_optional_decimal(
+                    _first_value(response, "fillPrice", "averagePrice")
+                ),
+                protection_confirmed=True,
+                environment=self.environment,
+                rejection_reason=_optional_text(response.get("errorMessage")),
+            )
+        except (TypeError, ValueError) as exc:
+            raise BrokerConnectionError("broker close response was invalid") from exc
+
     def reconcile_order(self, client_order_id: str) -> ExecutionResult | None:
         """Read an order state for reconciliation; never retries submission."""
         if not client_order_id:
@@ -285,6 +524,13 @@ class BrokerAdapter:
                 _first_value(response, "order", "orderId", "id")
             ),
             status=status,
+            filled_quantity=_optional_decimal(
+                _first_value(response, "filledQuantity", "filled_volume")
+            ),
+            fill_price=_optional_decimal(
+                _first_value(response, "fillPrice", "averagePrice")
+            ),
+            protection_confirmed=_protection_confirmation(response),
             environment=self.environment,
             rejection_reason=_optional_text(response.get("errorMessage")),
         )
@@ -296,10 +542,13 @@ class BrokerAdapter:
         *,
         body: Mapping[str, object] | None = None,
         safe_read: bool,
+        idempotency_key: str | None = None,
     ) -> dict[str, object]:
         attempts = self.max_attempts if safe_read else 1
         request_body = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if idempotency_key is not None:
+            headers["Idempotency-Key"] = idempotency_key
         if self.api_token is not None:
             headers["Authorization"] = f"Bearer {self.api_token}"
         for attempt in range(attempts):
@@ -347,42 +596,35 @@ class BrokerAdapter:
         self._sleep(self.backoff_seconds * (2**attempt))
 
     def _account_path(self) -> str:
-        if self.provider == "oanda":
-            return f"/v3/accounts/{self.account_id}/summary"
         return f"/api/accounts/{self.account_id}"
 
     def _pricing_path(self, instrument: str) -> str:
-        if self.provider == "oanda":
-            return f"/v3/accounts/{self.account_id}/pricing?instruments={instrument}"
         return f"/api/accounts/{self.account_id}/quotes/{instrument}"
 
+    def _instrument_path(self, instrument: str) -> str:
+        return f"{self._account_path()}/instruments/{quote(instrument, safe='')}"
+
+    def _session_path(self, instrument: str) -> str:
+        return f"{self._instrument_path(instrument)}/session"
+
+    def _history_path(self, instrument: str, *, timeframe: str, limit: int) -> str:
+        query = urlencode(
+            {"instrument": instrument, "timeframe": timeframe, "limit": limit}
+        )
+        return f"{self._account_path()}/candles?{query}"
+
     def _orders_path(self) -> str:
-        if self.provider == "oanda":
-            return f"/v3/accounts/{self.account_id}/orders"
         return f"/api/accounts/{self.account_id}/orders"
 
     def _order_path(self, client_order_id: str) -> str:
         return f"{self._orders_path()}/{client_order_id}"
 
+    def _position_close_path(self, position_id: str) -> str:
+        return f"{self._account_path()}/positions/{quote(position_id, safe='')}/close"
+
     def _order_body(self, payload: BrokerOrderPayload) -> dict[str, object]:
         if payload.environment not in {"PAPER", "DEMO"}:
             raise BrokerConnectionError("live order environments are forbidden")
-        stop_loss = str(payload.stop_loss.price)
-        take_profit = str(payload.take_profit.price)
-        if self.provider == "oanda":
-            units = str(
-                payload.quantity if payload.direction == "LONG" else -payload.quantity
-            )
-            return {
-                "order": {
-                    "type": "MARKET",
-                    "instrument": payload.instrument,
-                    "units": units,
-                    "clientExtensions": {"id": payload.client_order_id},
-                    "stopLossOnFill": {"price": stop_loss},
-                    "takeProfitOnFill": {"price": take_profit},
-                }
-            }
         return {
             "action": "DEAL",
             "symbol": payload.instrument,
@@ -391,8 +633,8 @@ class BrokerAdapter:
             if payload.direction == "LONG"
             else "ORDER_TYPE_SELL",
             "price": str(payload.entry_price),
-            "sl": stop_loss,
-            "tp": take_profit,
+            "sl": str(payload.stop_loss.price),
+            "tp": str(payload.take_profit.price),
             "comment": payload.client_order_id,
             "environment": payload.environment,
         }
@@ -413,8 +655,10 @@ class BrokerAdapter:
                     side.get("averagePrice", side.get("entry_price")),
                     "position entry price",
                 ),
+                position_id=_optional_text(
+                    side.get("positionId", side.get("ticket", raw.get("positionId")))
+                ),
             )
-        units = _decimal(raw.get("units", raw.get("quantity")), "position units")
         return OpenPosition(
             instrument=instrument,
             direction="LONG" if units >= 0 else "SHORT",
@@ -422,6 +666,9 @@ class BrokerAdapter:
             entry_price=_decimal(
                 raw.get("averagePrice", raw.get("entry_price")),
                 "position entry price",
+            ),
+            position_id=_optional_text(
+                raw.get("positionId", raw.get("ticket", raw.get("id")))
             ),
         )
 
@@ -465,8 +712,8 @@ class BrokerAdapter:
         return value.astimezone(timezone.utc)
 
 
-class OandaDemoAdapter(BrokerAdapter):
-    """OANDA v20 practice adapter."""
+class ExnessMT5Broker(BaseBroker):
+    """Exness MT5 demo adapter behind a REST bridge."""
 
     def __init__(
         self,
@@ -480,12 +727,13 @@ class OandaDemoAdapter(BrokerAdapter):
         max_attempts: int = 3,
         backoff_seconds: float = 0.25,
         stale_after_seconds: float = 30.0,
+        future_tolerance_seconds: float = 0.0,
         now: Callable[[], datetime] | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
         super().__init__(
             transport,
-            provider="oanda",
+            provider="exness_mt5",
             base_url=base_url,
             account_id=account_id,
             environment=environment,
@@ -494,47 +742,10 @@ class OandaDemoAdapter(BrokerAdapter):
             max_attempts=max_attempts,
             backoff_seconds=backoff_seconds,
             stale_after_seconds=stale_after_seconds,
+            future_tolerance_seconds=future_tolerance_seconds,
             now=now,
             sleep=sleep,
         )
-
-
-class MT5DemoAdapter(BrokerAdapter):
-    """MetaTrader 5 demo adapter behind a REST bridge."""
-
-    def __init__(
-        self,
-        transport: BrokerTransport,
-        *,
-        base_url: str,
-        account_id: str,
-        environment: Environment = "DEMO",
-        api_token: str | None = None,
-        timeout_seconds: float = 5.0,
-        max_attempts: int = 3,
-        backoff_seconds: float = 0.25,
-        stale_after_seconds: float = 30.0,
-        now: Callable[[], datetime] | None = None,
-        sleep: Callable[[float], None] | None = None,
-    ) -> None:
-        super().__init__(
-            transport,
-            provider="mt5",
-            base_url=base_url,
-            account_id=account_id,
-            environment=environment,
-            api_token=api_token,
-            timeout_seconds=timeout_seconds,
-            max_attempts=max_attempts,
-            backoff_seconds=backoff_seconds,
-            stale_after_seconds=stale_after_seconds,
-            now=now,
-            sleep=sleep,
-        )
-
-
-OandaBrokerAdapter = OandaDemoAdapter
-MT5BrokerAdapter = MT5DemoAdapter
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -551,6 +762,31 @@ def _decimal(value: object, field_name: str) -> Decimal:
     if not parsed.is_finite():
         raise ValueError(f"{field_name} must be finite")
     return parsed
+
+
+def _integer(value: object, field_name: str) -> int:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} is invalid") from exc
+    if parsed < 0:
+        raise ValueError(f"{field_name} must be non-negative")
+    return parsed
+
+
+def _optional_decimal(value: object) -> Decimal | None:
+    return None if value is None else _decimal(value, "optional decimal")
+
+
+def _protection_confirmation(response: Mapping[str, object]) -> bool | None:
+    explicit = response.get("protectionConfirmed", response.get("protected"))
+    if isinstance(explicit, bool):
+        return explicit
+    stop_loss = _first_value(response, "stopLoss", "sl")
+    take_profit = _first_value(response, "takeProfit", "tp")
+    if stop_loss is not None and take_profit is not None:
+        return True
+    return None
 
 
 def _required_text(value: object, field_name: str) -> str:
@@ -571,10 +807,18 @@ def _optional_text(value: object) -> str | None:
 
 def _execution_status(value: object) -> ExecutionStatus:
     status = str(value).upper()
+    if status in {"FILLED", "EXECUTED", "COMPLETED"}:
+        return "FILLED"
+    if status in {"PARTIALLY_FILLED", "PARTIAL", "PARTIALLYFILLED"}:
+        return "PARTIALLY_FILLED"
     if status == "ACCEPTED":
         return "ACCEPTED"
-    if status == "REJECTED":
+    if status in {"REJECTED", "DENIED"}:
         return "REJECTED"
+    if status in {"CANCELLED", "CANCELED"}:
+        return "CANCELLED"
+    if status == "EXPIRED":
+        return "EXPIRED"
     return "UNKNOWN"
 
 

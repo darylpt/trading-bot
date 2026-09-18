@@ -5,9 +5,12 @@ pandas==2.2.3
 pandas-ta-classic==0.3.15
 openai==1.68.2
 ollama==0.4.7
-oandapyV20==0.7.2
 pydantic==2.10.6
 pydantic-settings==2.8.1
+MetaTrader5==5.0.6180; sys_platform == "win32"
+fastapi==0.115.11
+uvicorn==0.34.0
+streamlit==1.43.2
 
 # Development and verification tools
 pytest==8.3.5

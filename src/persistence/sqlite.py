@@ -35,6 +35,13 @@ class ExecutionLogRecord:
     provider: str
     error_class: str | None
     message: str
+    instrument: str = "UNKNOWN"
+    strategy_name: str = "ema_crossover"
+    decision_rationale: str | None = None
+    reference_price: Decimal | None = None
+    fast_average: Decimal | None = None
+    slow_average: Decimal | None = None
+    distance_to_crossover: Decimal | None = None
     latency_ms: int | None = None
     slippage: Decimal | None = None
 
@@ -72,6 +79,17 @@ class SessionMetricsRecord:
     closed_trades: int = 0
     winning_trades: int = 0
     losing_trades: int = 0
+
+
+@dataclass(frozen=True)
+class CircuitBreakerRecord:
+    """Latest persisted market-data safety state."""
+
+    status: Literal["CLEAR", "HALTED"]
+    reason: str
+    candle_timestamp: datetime | None
+    spread: Decimal | None
+    updated_at: datetime
 
 
 def _direction(value: object) -> Literal["LONG", "SHORT"]:
@@ -121,13 +139,48 @@ class SQLiteRepository:
         self.initialize_schema()
 
     def initialize_schema(self) -> None:
-        """Create tables and add Phase 4 columns to existing databases."""
+        """Create tables and migrate legacy trade status constraints."""
+        legacy_sql = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'trade_logs'"
+        ).fetchone()
+        if legacy_sql is not None and "PARTIALLY_FILLED" not in str(legacy_sql[0]):
+            self.connection.execute(
+                "ALTER TABLE trade_logs RENAME TO trade_logs_legacy"
+            )
+            self.connection.commit()
         schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         self.connection.executescript(schema)
+        if legacy_sql is not None and "PARTIALLY_FILLED" not in str(legacy_sql[0]):
+            self.connection.execute(
+                """INSERT INTO trade_logs
+                   SELECT client_order_id, instrument, direction, quantity,
+                          entry_price, stop_loss_price, take_profit_price,
+                          account_equity, risk_fraction, status, environment,
+                          rejection_reason, opened_at
+                   FROM trade_logs_legacy"""
+            )
+            self.connection.execute("DROP TABLE trade_logs_legacy")
         existing_columns = {
             str(row[1])
             for row in self.connection.execute("PRAGMA table_info(session_metrics)")
         }
+        execution_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(execution_logs)")
+        }
+        for name, definition in (
+            ("instrument", "TEXT NOT NULL DEFAULT 'UNKNOWN'"),
+            ("strategy_name", "TEXT NOT NULL DEFAULT 'ema_crossover'"),
+            ("decision_rationale", "TEXT"),
+            ("reference_price", "NUMERIC"),
+            ("fast_average", "NUMERIC"),
+            ("slow_average", "NUMERIC"),
+            ("distance_to_crossover", "NUMERIC"),
+        ):
+            if name not in execution_columns:
+                self.connection.execute(
+                    f"ALTER TABLE execution_logs ADD COLUMN {name} {definition}"
+                )
         for name, definition in (
             ("realized_pnl", "NUMERIC NOT NULL DEFAULT 0"),
             ("closed_trades", "INTEGER NOT NULL DEFAULT 0"),
@@ -140,8 +193,8 @@ class SQLiteRepository:
                 )
         self.connection.commit()
 
-    def save_trade(self, record: TradeRecord) -> None:
-        self.connection.execute(
+    def save_trade(self, record: TradeRecord) -> bool:
+        cursor = self.connection.execute(
             """INSERT OR IGNORE INTO trade_logs
             (client_order_id, instrument, direction, quantity, entry_price,
              stop_loss_price, take_profit_price, account_equity, risk_fraction,
@@ -164,6 +217,93 @@ class SQLiteRepository:
             ),
         )
         self.connection.commit()
+        return cursor.rowcount == 1
+
+    def update_trade_status(
+        self,
+        client_order_id: str,
+        *,
+        status: str,
+        rejection_reason: str | None = None,
+    ) -> None:
+        """Update durable broker state without replacing the original intent."""
+        if status not in {
+            "PENDING_SUBMISSION",
+            "PENDING",
+            "FILLED",
+            "PARTIALLY_FILLED",
+            "ACCEPTED",
+            "REJECTED",
+            "CANCELLED",
+            "EXPIRED",
+            "UNKNOWN",
+        }:
+            raise ValueError("invalid trade status")
+        cursor = self.connection.execute(
+            """UPDATE trade_logs SET status = ?, rejection_reason = ?
+               WHERE client_order_id = ?""",
+            (status, rejection_reason, client_order_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("trade intent is missing")
+        self.connection.commit()
+
+    def get_unresolved_trades(self) -> list[TradeRecord]:
+        """Return intents that require broker reconciliation."""
+        rows = self.connection.execute(
+            """SELECT client_order_id, instrument, direction, quantity,
+                      entry_price, stop_loss_price, take_profit_price,
+                      account_equity, risk_fraction, status, environment,
+                      rejection_reason
+               FROM trade_logs WHERE status IN ('PENDING_SUBMISSION', 'PENDING', 'UNKNOWN')
+               ORDER BY opened_at, client_order_id"""
+        ).fetchall()
+        return [
+            TradeRecord(
+                client_order_id=str(row[0]),
+                instrument=str(row[1]),
+                direction=str(row[2]),
+                quantity=Decimal(str(row[3])),
+                entry_price=Decimal(str(row[4])),
+                stop_loss_price=Decimal(str(row[5])),
+                take_profit_price=Decimal(str(row[6])),
+                account_equity=Decimal(str(row[7])),
+                risk_fraction=Decimal(str(row[8])),
+                status=str(row[9]),
+                environment=str(row[10]),
+                rejection_reason=None if row[11] is None else str(row[11]),
+            )
+            for row in rows
+        ]
+
+    def get_reconcilable_trades(self) -> list[TradeRecord]:
+        """Return durable intents that may identify broker open positions."""
+        rows = self.connection.execute(
+            """SELECT client_order_id, instrument, direction, quantity,
+                      entry_price, stop_loss_price, take_profit_price,
+                      account_equity, risk_fraction, status, environment,
+                      rejection_reason
+               FROM trade_logs
+               WHERE status IN ('PENDING_SUBMISSION', 'PENDING', 'FILLED', 'ACCEPTED', 'UNKNOWN')
+               ORDER BY opened_at, client_order_id"""
+        ).fetchall()
+        return [
+            TradeRecord(
+                client_order_id=str(row[0]),
+                instrument=str(row[1]),
+                direction=str(row[2]),
+                quantity=Decimal(str(row[3])),
+                entry_price=Decimal(str(row[4])),
+                stop_loss_price=Decimal(str(row[5])),
+                take_profit_price=Decimal(str(row[6])),
+                account_equity=Decimal(str(row[7])),
+                risk_fraction=Decimal(str(row[8])),
+                status=str(row[9]),
+                environment=str(row[10]),
+                rejection_reason=None if row[11] is None else str(row[11]),
+            )
+            for row in rows
+        ]
 
     def trade_count(self) -> int:
         row = self.connection.execute("SELECT COUNT(*) FROM trade_logs").fetchone()
@@ -279,15 +419,27 @@ class SQLiteRepository:
         """Persist one sanitized execution event."""
         self.connection.execute(
             """INSERT INTO execution_logs
-            (client_order_id, event_type, provider, error_class, message,
-             latency_ms, slippage, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (client_order_id, instrument, strategy_name, event_type, provider, error_class,
+             message, decision_rationale, reference_price, fast_average, slow_average,
+             distance_to_crossover, latency_ms, slippage, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.client_order_id,
+                record.instrument,
+                record.strategy_name,
                 record.event_type,
                 record.provider,
                 record.error_class,
                 record.message,
+                record.decision_rationale,
+                None if record.reference_price is None else str(record.reference_price),
+                None if record.fast_average is None else str(record.fast_average),
+                None if record.slow_average is None else str(record.slow_average),
+                (
+                    None
+                    if record.distance_to_crossover is None
+                    else str(record.distance_to_crossover)
+                ),
                 record.latency_ms,
                 None if record.slippage is None else str(record.slippage),
                 datetime.now(timezone.utc).isoformat(),
@@ -402,6 +554,86 @@ class SQLiteRepository:
             )
             for row in rows
         ]
+
+    def save_circuit_breaker(
+        self,
+        *,
+        status: Literal["CLEAR", "HALTED"],
+        reason: str,
+        candle_timestamp: datetime | None,
+        spread: Decimal | None,
+        updated_at: datetime,
+    ) -> None:
+        self.connection.execute(
+            """INSERT INTO circuit_breaker_status
+               (singleton_id, status, reason, candle_timestamp, spread, updated_at)
+               VALUES (1, ?, ?, ?, ?, ?)
+               ON CONFLICT(singleton_id) DO UPDATE SET
+                 status = excluded.status,
+                 reason = excluded.reason,
+                 candle_timestamp = excluded.candle_timestamp,
+                 spread = excluded.spread,
+                 updated_at = excluded.updated_at""",
+            (
+                status,
+                reason,
+                None if candle_timestamp is None else candle_timestamp.isoformat(),
+                None if spread is None else str(spread),
+                updated_at.isoformat(),
+            ),
+        )
+        self.connection.commit()
+
+    def clear_circuit_breaker(self) -> None:
+        """Discard health state from a previous daemon process."""
+        self.connection.execute("DELETE FROM circuit_breaker_status")
+        self.connection.commit()
+
+    def get_circuit_breaker(self) -> CircuitBreakerRecord | None:
+        row = self.connection.execute(
+            """SELECT status, reason, candle_timestamp, spread, updated_at
+               FROM circuit_breaker_status WHERE singleton_id = 1"""
+        ).fetchone()
+        if row is None:
+            return None
+        status: Literal["CLEAR", "HALTED"] = (
+            "CLEAR" if str(row[0]) == "CLEAR" else "HALTED"
+        )
+        return CircuitBreakerRecord(
+            status=status,
+            reason=str(row[1]),
+            candle_timestamp=(
+                None if row[2] is None else datetime.fromisoformat(str(row[2]))
+            ),
+            spread=None if row[3] is None else Decimal(str(row[3])),
+            updated_at=datetime.fromisoformat(str(row[4])),
+        )
+
+    def set_trading_halt(self, halted: bool, *, reason: str) -> None:
+        """Persist the global entry halt without affecting position monitoring."""
+        self.connection.execute(
+            """INSERT INTO runtime_controls
+               (singleton_id, trading_halted, reason, updated_at)
+               VALUES (1, ?, ?, ?)
+               ON CONFLICT(singleton_id) DO UPDATE SET
+                 trading_halted = excluded.trading_halted,
+                 reason = excluded.reason,
+                 updated_at = excluded.updated_at""",
+            (
+                int(halted),
+                reason,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self.connection.commit()
+
+    def get_trading_halt(self) -> tuple[bool, str]:
+        """Return the persisted halt state and operator reason."""
+        row = self.connection.execute(
+            """SELECT trading_halted, reason FROM runtime_controls
+               WHERE singleton_id = 1"""
+        ).fetchone()
+        return (False, "not configured") if row is None else (bool(row[0]), str(row[1]))
 
     def close(self) -> None:
         self.connection.close()

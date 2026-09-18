@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from execution.broker_adapter import InstrumentMetadata
+
 
 def calculate_position_size(
     *,
@@ -42,6 +44,31 @@ def calculate_position_size(
     if maximum_size is not None and (maximum_size <= 0 or size > maximum_size):
         raise ValueError("calculated size violates broker maximum")
     return size
+
+
+def calculate_broker_position_size(
+    *,
+    account_equity: Decimal,
+    entry_price: Decimal,
+    stop_loss_price: Decimal,
+    metadata: InstrumentMetadata,
+    risk_fraction: Decimal = Decimal("0.01"),
+) -> Decimal:
+    """Size a position using the broker's tick and quantity constraints."""
+    if metadata.tick_size <= 0 or metadata.tick_value <= 0:
+        raise ValueError("broker tick metadata must be positive")
+    pip_value = metadata.tick_value / metadata.tick_size
+    return calculate_position_size(
+        account_equity=account_equity,
+        entry_price=entry_price,
+        stop_loss_price=stop_loss_price,
+        risk_fraction=risk_fraction,
+        contract_size=metadata.contract_size,
+        pip_value=pip_value,
+        minimum_size=metadata.minimum_quantity,
+        maximum_size=metadata.maximum_quantity,
+        quantity_step=metadata.quantity_step,
+    )
 
 
 def risk_amount(

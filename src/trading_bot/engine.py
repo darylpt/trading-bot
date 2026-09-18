@@ -220,6 +220,7 @@ class TradingEngine:
         self._repository.save_execution_log(
             ExecutionLogRecord(
                 client_order_id=execution.client_order_id,
+                instrument=order.instrument,
                 event_type=f"ORDER_{execution.status}",
                 provider="execution_gate",
                 error_class=execution.rejection_reason,
@@ -292,6 +293,11 @@ class TradingEngine:
         self._repository.save_execution_log(
             ExecutionLogRecord(
                 client_order_id=client_order_id,
+                instrument=(
+                    technical_signal.instrument
+                    if technical_signal is not None
+                    else "UNKNOWN"
+                ),
                 event_type=event_type,
                 provider="sentiment_pipeline",
                 error_class="PipelineRejection",

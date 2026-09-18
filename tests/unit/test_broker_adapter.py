@@ -8,9 +8,10 @@ import pytest
 
 from domain.models import BrokerOrderPayload, ExitPayload
 from execution.broker_adapter import (
+    BaseBroker,
     BrokerAccountState,
-    BrokerAdapter,
     BrokerConnectionError,
+    ExnessMT5Broker,
     MarketQuote,
     StaleMarketDataError,
 )
@@ -46,16 +47,16 @@ def adapter(
     transport: FakeTransport,
     *,
     sleep_calls: list[float] | None = None,
-) -> BrokerAdapter:
-    return BrokerAdapter(
+    future_tolerance_seconds: float = 0.0,
+) -> BaseBroker:
+    return ExnessMT5Broker(
         transport,
-        provider="oanda",
-        base_url="https://api-fxpractice.oanda.com",
+        base_url="https://demo.exness-mt5.local",
         account_id="demo-account",
         environment="DEMO",
         api_token="demo-token",
-        timeout_seconds=2.0,
         backoff_seconds=0.1,
+        future_tolerance_seconds=future_tolerance_seconds,
         now=now,
         sleep=(sleep_calls if sleep_calls is not None else []).append,
     )
@@ -103,6 +104,30 @@ def test_account_polling_returns_balance_equity_margin_and_positions() -> None:
     assert result.open_positions[0].quantity == Decimal("100")
 
 
+def test_instrument_metadata_accepts_flat_bridge_response() -> None:
+    transport = FakeTransport(
+        {
+            "instrument": "XAUUSDm",
+            "contractSize": "100",
+            "tickSize": "0.001",
+            "tickValue": "0.1",
+            "quantityStep": "0.01",
+            "minimumQuantity": "0.01",
+            "maximumQuantity": "200",
+            "stopLevel": "0",
+            "freezeLevel": "0",
+            "precision": 3,
+            "timestamp": now().isoformat(),
+        }
+    )
+
+    result = adapter(transport).get_instrument_metadata("XAUUSDm")
+
+    assert result.instrument == "XAUUSDm"
+    assert result.contract_size == Decimal("100")
+    assert result.quantity_step == Decimal("0.01")
+
+
 def test_market_polling_returns_live_spread() -> None:
     transport = FakeTransport(
         {
@@ -137,16 +162,30 @@ def test_stale_market_data_is_rejected() -> None:
         adapter(transport).get_market_quote("EUR_USD")
 
 
+def test_quote_within_configured_clock_drift_is_accepted() -> None:
+    transport = FakeTransport(
+        {
+            "bid": "1.1000",
+            "ask": "1.1002",
+            "timestamp": (now() + timedelta(seconds=3)).isoformat(),
+        }
+    )
+
+    result = adapter(transport, future_tolerance_seconds=5).get_market_quote("EUR_USD")
+
+    assert result.observed_at == now() + timedelta(seconds=3)
+
+
 def test_order_placement_maps_broker_side_stop_and_target() -> None:
-    transport = FakeTransport({"orderCreateTransaction": {"id": "broker-1"}})
+    transport = FakeTransport({"order": {"id": "broker-1"}})
     result = adapter(transport).submit_order(order_payload())
 
     assert result.status == "ACCEPTED"
     assert result.provider_order_id == "broker-1"
     request_body = cast(bytes, transport.calls[0]["body"]).decode("utf-8")
-    assert '"stopLossOnFill": {"price": "1.0950"}' in request_body
-    assert '"takeProfitOnFill": {"price": "1.1100"}' in request_body
-    assert '"units": "100"' in request_body
+    assert '"sl": "1.0950"' in request_body
+    assert '"tp": "1.1100"' in request_body
+    assert '"volume": "100"' in request_body
 
 
 def test_transient_timeout_retries_reads_with_exponential_backoff() -> None:

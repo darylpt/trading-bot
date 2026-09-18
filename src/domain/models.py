@@ -217,10 +217,19 @@ class BrokerOrderPayload(StrictModel):
 class ExecutionResult(StrictModel):
     client_order_id: str = Field(min_length=1)
     provider_order_id: str | None = None
-    status: Literal["ACCEPTED", "REJECTED", "UNKNOWN"]
+    status: Literal[
+        "ACCEPTED",
+        "FILLED",
+        "PARTIALLY_FILLED",
+        "REJECTED",
+        "CANCELLED",
+        "EXPIRED",
+        "UNKNOWN",
+    ]
     filled_quantity: Decimal | None = Field(default=None, gt=0)
     fill_price: Decimal | None = Field(default=None, gt=0)
     slippage: Decimal | None = None
     latency_ms: int | None = Field(default=None, ge=0)
+    protection_confirmed: bool | None = None
     rejection_reason: str | None = None
     environment: Literal["PAPER", "DEMO"]

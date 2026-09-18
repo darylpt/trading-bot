@@ -204,3 +204,75 @@ def test_rejected_sentiment_aborts_before_execution(tmp_path: Path) -> None:
     assert repository.trade_count() == 0
     assert repository.execution_log_count() == 1
     repository.close()
+
+
+def test_restart_reconciles_durable_unknown_without_resubmission(
+    tmp_path: Path,
+) -> None:
+    """Exercise the complete deterministic path across a process restart."""
+    fixture = _fixture(tmp_path)
+    candles = load_csv_candles(fixture.candles_path, minimum_history=6)
+    llm = MockSentimentClient(
+        SentimentAnalysisResult(
+            decision="CONFIRM",
+            confidence_score=1.0,
+            reasoning="deterministic paper approval",
+        )
+    )
+
+    class TimedOutGateway(PaperGateway):
+        def submit_order(self, payload: BrokerOrderPayload) -> ExecutionResult:
+            self.payloads.append(payload)
+            raise TimeoutError("simulated process interruption")
+
+    first_gateway = TimedOutGateway()
+    first_repository = SQLiteRepository(tmp_path / "session_metrics.db")
+    first_engine = TradingEngine(
+        sentiment_client=llm,
+        execution_gate=ExecutionGate(
+            first_gateway,
+            environment="PAPER",
+            repository=first_repository,
+        ),
+        repository=first_repository,
+        config=PipelineConfig(
+            rsi_period=2,
+            fast_period=2,
+            slow_period=3,
+            atr_period=2,
+        ),
+    )
+    first = first_engine.run(
+        candles=candles,
+        news_events=[_news_event(fixture.current_time - timedelta(hours=2))],
+        account=fixture.account,
+        client_order_id="restart-order-1",
+        current_time=fixture.current_time,
+    )
+    assert first.execution.status == "UNKNOWN"
+    assert first_repository.get_trade("restart-order-1").status == "UNKNOWN"
+    first_repository.close()
+
+    class ReconcileGateway(PaperGateway):
+        def reconcile_order(self, client_order_id: str) -> ExecutionResult:
+            return ExecutionResult(
+                client_order_id=client_order_id,
+                provider_order_id="broker-fill-1",
+                status="ACCEPTED",
+                filled_quantity=Decimal("1"),
+                fill_price=Decimal("1.106"),
+                environment="PAPER",
+            )
+
+    second_repository = SQLiteRepository(tmp_path / "session_metrics.db")
+    second_gateway = ReconcileGateway()
+    reconciled = ExecutionGate(
+        second_gateway,
+        environment="PAPER",
+        repository=second_repository,
+    ).reconcile_pending()
+
+    assert [result.status for result in reconciled] == ["ACCEPTED"]
+    assert second_gateway.payloads == []
+    assert second_repository.get_trade("restart-order-1").status == "ACCEPTED"
+    second_repository.close()

@@ -1,5 +1,7 @@
 # Technical Specification: Containerized Hybrid Forex Trading Bot
 
+> **Status and authority:** This technical specification is retained as historical design context. The active Phase 0 contract is `docs/PHASE-0-SECURE-BASELINE-SPEC.md`; broker-demo readiness is governed by `docs/PAPER-TRADING-READINESS.md`; workflow is governed by `docs/SPEC-DRIVEN-DEVELOPMENT.md`; task tracking is in `TODO.md`. The first broker-demo provider is Exness MT5 behind `BaseBroker`, with `SimulatedBroker` for local testing. OANDA is discarded and must not be implemented.
+
 ## 1. Technical objectives
 
 Implement the system described in `CONTEXT.md` and constrained by `AGENTS.md` as a typed Python 3.11+ application:
@@ -7,7 +9,7 @@ Implement the system described in `CONTEXT.md` and constrained by `AGENTS.md` as
 - Deterministic technical strategy and backtesting.
 - Provider-neutral, strict-JSON LLM sentiment analysis.
 - A risk circuit breaker enforcing per-trade and daily-loss limits.
-- A single broker execution gate for OANDA v20 or MetaTrader 5 paper/demo accounts.
+- A single broker execution gate for Exness MT5 demo accounts behind `BaseBroker`. OANDA support is out of scope.
 - Docker and Docker Compose isolation for Python and native C dependencies, including TA-Lib.
 - Durable SQLite or PostgreSQL trade, sentiment, news, and execution history.
 
@@ -68,7 +70,7 @@ The `Dockerfile` must:
 ### 2.3 Compose runtime contract
 
 - `app` receives `.env` through a read-only runtime mount at `/app/.env` or an equivalent Compose `env_file`; the file is never copied during build.
-- `PAPER_TRADING=true`, `LIVE_TRADING=false`, and an OANDA/MT5 demo endpoint are required.
+- `PAPER_TRADING=true`, `LIVE_TRADING=false`, and Exness MT5 demo configuration are required for `BROKER_DEMO`; tests use no broker credentials.
 - `test` runs `docker compose run --rm test pytest ...` and does not need broker credentials.
 - PostgreSQL credentials are supplied through runtime environment configuration and never hardcoded in Compose or Dockerfile instructions.
 - PostgreSQL remains private to the Compose network unless an explicit local-development port mapping is configured.
@@ -99,7 +101,7 @@ src/
 │   └── models.py                   # Pydantic cross-module contracts
 ├── strategy/
 │   ├── __init__.py
-│   ├── market_data.py               # CSV/OANDA/MT5 candle normalization
+│   ├── market_data.py               # CSV/Exness MT5 candle normalization
 │   ├── indicators.py                # RSI, MA, ATR calculations
 │   ├── signals.py                   # LONG/SHORT technical signals
 │   └── backtest.py                  # Backtrader/Freqtrade adapter
@@ -118,9 +120,8 @@ src/
 ├── execution/
 │   ├── __init__.py
 │   ├── protocols.py                 # Broker-neutral interfaces
-│   ├── payloads.py                  # OANDA/MT5 canonical payloads
-│   ├── oanda.py                     # OANDA v20 adapter
-│   ├── mt5.py                       # MetaTrader 5 adapter
+│   ├── payloads.py                  # Broker-neutral canonical payloads
+│   ├── exness_mt5.py                # ExnessMT5Broker adapter
 │   └── executor.py                  # Single rejecting submission wrapper
 ├── persistence/
 │   ├── __init__.py
@@ -342,7 +343,7 @@ class BrokerOrderPayload(BaseModel):
     environment: Literal["PAPER", "DEMO"]
 ```
 
-The OANDA and MT5 adapters map this payload to provider-specific fields. They must not remove either exit.
+The `ExnessMT5Broker` maps this payload to provider-specific fields. It must not remove either exit.
 
 ### 4.8 Execution result
 
@@ -505,7 +506,7 @@ Never persist raw authorization-bearing LLM payloads.
 | `id` | INTEGER/BIGSERIAL | Primary key |
 | `client_order_id` | TEXT | Nullable correlation ID |
 | `event_type` | TEXT | Validation, submission, fill, rejection, timeout, disconnect, halt, or error |
-| `provider` | TEXT | OANDA, MT5, OpenAI, Ollama, or internal |
+| `provider` | TEXT | Exness MT5, OpenAI, Ollama, or internal |
 | `error_class` | TEXT | Nullable sanitized category |
 | `message` | TEXT | No secrets or raw payloads |
 | `latency_ms` | INTEGER | Nullable |
@@ -539,12 +540,12 @@ Record rejection reason, signal ID, event IDs, drawdown state, latency, slippage
 
 ## 8. Security strategy
 
-- Store OpenAI, OANDA, MT5, PostgreSQL, and other credentials in `.env` or runtime secret injection only.
+- Store OpenAI, Exness MT5, PostgreSQL, and other credentials in `.env` or runtime secret injection only.
 - Mount `.env` read-only into the `app` container at runtime or use an equivalent Compose `env_file`; never `COPY .env`.
 - `.env` is excluded by `.dockerignore`; `.env.example` contains names and safe placeholders only.
 - Never pass credentials through Dockerfile `ARG`, image labels, build logs, source files, tests, fixtures, notebooks, or committed configuration.
 - Build images without broker/API secrets. Use BuildKit secret mounts only for private dependency installation and ensure no secret persists in a layer.
-- Require `PAPER_TRADING=true`, `LIVE_TRADING=false`, and an OANDA/MT5 demo endpoint. Live endpoints are prohibited by default.
+- Require `PAPER_TRADING=true`, `LIVE_TRADING=false`, and an Exness MT5 demo endpoint. Live endpoints are prohibited by default.
 - Run the app as a non-root user and keep PostgreSQL private to the Compose network.
 - Use least-privilege demo credentials and separate accounts for development.
 - Persist operational records, never credentials, in SQLite/PostgreSQL volumes.

@@ -7,6 +7,7 @@ import importlib.util
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -39,6 +40,17 @@ def test_talib_imports_when_installed() -> None:
         pytest.skip("TA-Lib is optional outside the container image")
 
     assert importlib.import_module("talib") is not None
+
+
+def test_build_context_excludes_credential_artifacts() -> None:
+    dockerignore = Path(__file__).resolve().parents[2] / ".dockerignore"
+    patterns = {
+        line.strip()
+        for line in dockerignore.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert {"*.pem", "*.key", "*.crt"} <= patterns
 
 
 def test_container_health_is_ok() -> None:

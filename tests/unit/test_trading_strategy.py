@@ -37,8 +37,14 @@ def test_moving_average_crossover_emits_buy_sell_and_hold() -> None:
     )
 
     assert buy.action == "BUY"
+    assert "Bullish crossover" in buy.rationale
+    assert buy.fast_ema == buy.fast_average
+    assert buy.slow_ema == buy.slow_average
+    assert buy.distance_to_crossover == buy.fast_average - buy.slow_average
     assert sell.action == "SELL"
+    assert "Bearish crossover" in sell.rationale
     assert hold.action == "HOLD"
+    assert "No crossover" in hold.rationale
 
 
 def test_moving_average_strategy_holds_during_warmup() -> None:

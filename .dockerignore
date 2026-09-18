@@ -4,6 +4,9 @@
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.crt
 
 # Python environments and caches
 .venv

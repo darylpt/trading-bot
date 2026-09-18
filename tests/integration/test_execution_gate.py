@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 from domain.models import BrokerOrderPayload, ExecutionResult, OrderIntent
 from execution.executor import ExecutionGate
 from execution.broker_adapter import BrokerConnectionError
+from persistence.sqlite import SQLiteRepository
 
 
 class FakeGateway:
@@ -69,3 +71,78 @@ def test_broker_connection_failure_rejects_new_entry() -> None:
     assert result.status == "REJECTED"
     assert result.rejection_reason == "BrokerConnectionError"
     assert gateway.calls == 1
+
+
+def test_durable_intent_reconciles_after_restart_without_resubmission(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteRepository(tmp_path / "session.db")
+    first_gateway = FakeGateway(error=TimeoutError())
+    first = ExecutionGate(
+        first_gateway, environment="PAPER", repository=repository
+    ).submit(order())
+    assert first.status == "UNKNOWN"
+    assert repository.get_trade("exec-1").status == "UNKNOWN"
+
+    class ReconciledGateway(FakeGateway):
+        def reconcile_order(self, client_order_id: str) -> ExecutionResult:
+            return ExecutionResult(
+                client_order_id=client_order_id,
+                status="ACCEPTED",
+                environment="PAPER",
+            )
+
+    gateway = ReconciledGateway()
+    gate = ExecutionGate(gateway, environment="PAPER", repository=repository)
+    reconciled = gate.reconcile_pending()
+
+    assert reconciled[0].status == "ACCEPTED"
+    assert gateway.calls == 0
+    assert repository.get_trade("exec-1").status == "ACCEPTED"
+    repository.close()
+
+
+def test_reconcile_reconstructs_open_position_after_restart(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "session.db")
+    first_gateway = FakeGateway(error=TimeoutError())
+    ExecutionGate(first_gateway, environment="PAPER", repository=repository).submit(
+        order()
+    )
+
+    from execution.broker_adapter import BrokerAccountState, OpenPosition
+
+    class RestartGateway(FakeGateway):
+        def reconcile_order(self, client_order_id: str) -> ExecutionResult:
+            return ExecutionResult(
+                client_order_id=client_order_id,
+                status="UNKNOWN",
+                environment="PAPER",
+            )
+
+        def get_account_snapshot(self) -> BrokerAccountState:
+            return BrokerAccountState(
+                balance=Decimal("10000"),
+                equity=Decimal("10000"),
+                margin=Decimal("0"),
+                open_positions=(
+                    OpenPosition(
+                        instrument="EUR_USD",
+                        direction="LONG",
+                        quantity=Decimal("20"),
+                        entry_price=Decimal("1.1"),
+                    ),
+                ),
+                captured_at=datetime.now(timezone.utc),
+                environment="PAPER",
+            )
+
+    gateway = RestartGateway()
+    results = ExecutionGate(
+        gateway, environment="PAPER", repository=repository
+    ).reconcile()
+
+    assert [result.status for result in results] == ["UNKNOWN"]
+    assert repository.get_trade("exec-1").status == "FILLED"
+    assert len(repository.get_open_positions("EUR_USD")) == 1
+    assert gateway.calls == 0
+    repository.close()

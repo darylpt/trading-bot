@@ -12,16 +12,29 @@ from pathlib import Path
 from typing import Callable, Literal, Protocol
 from urllib.parse import urlparse
 
+from domain.models import MarketCandle
+from trading_bot.config import (
+    DEFAULT_INSTRUMENT,
+    DEMO_ACCOUNT_ID,
+    DEMO_BRIDGE_HOSTS,
+    validate_instrument,
+)
+
 from execution.broker_adapter import (
     BrokerConnectionError,
     BrokerTransport,
-    MT5DemoAdapter,
+    ExnessMT5Broker,
+    InstrumentMetadata,
     MarketQuote,
-    UrllibTransport,
+    TradingSession,
+)
+from execution.exness_mt5_adapter import (
+    BridgeHealth,
+    ExnessMT5BridgeTransport,
 )
 
 BrokerEnvironment = Literal["paper", "demo"]
-AdapterMode = Literal["SIMULATED", "REST", "NATIVE"]
+AdapterMode = Literal["SIMULATED", "BROKER_DEMO", "REST", "NATIVE"]
 
 
 @dataclass(frozen=True)
@@ -32,47 +45,125 @@ class BrokerConnectionConfig:
     account: str | None
     server: str | None
     endpoint: str | None
+    bridge_host: str | None = None
+    bridge_port: int = 18812
     environment: BrokerEnvironment = "demo"
-    instrument: str = "EUR_USD"
+    runtime_mode: Literal["SIMULATED", "BROKER_DEMO"] = "SIMULATED"
+    instrument: str = DEFAULT_INSTRUMENT
     fallback_data_path: Path = Path("data/market_data.csv")
+    future_tolerance_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         if self.environment not in {"paper", "demo"}:
             raise ValueError("MT5 adapter only supports paper/demo environments")
         if not self.instrument:
             raise ValueError("MT5 instrument must not be empty")
+        validate_instrument(self.instrument)
+        if self.future_tolerance_seconds < 0:
+            raise ValueError("MT5 future tolerance must not be negative")
+        if self.bridge_port < 1 or self.bridge_port > 65535:
+            raise ValueError("MT5 bridge port is invalid")
+        if self.runtime_mode == "BROKER_DEMO":
+            if not self.account:
+                raise ValueError("account is missing")
+            if self.account != DEMO_ACCOUNT_ID:
+                raise ValueError("account is not an allowlisted BROKER_DEMO account")
         if self.endpoint:
-            hostname = (urlparse(self.endpoint).hostname or "").lower()
-            if not any(
-                marker in hostname
-                for marker in ("demo", "practice", "paper", "localhost", "127.0.0.1")
+            parsed = urlparse(self.endpoint)
+            hostname = (parsed.hostname or "").lower().rstrip(".")
+            if (
+                parsed.scheme != "https"
+                or hostname not in {"demo.exness-mt5.local", *DEMO_BRIDGE_HOSTS}
+                or not (
+                    parsed.port in {None, 443}
+                    or (hostname in DEMO_BRIDGE_HOSTS and parsed.port is not None)
+                )
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
             ):
-                raise ValueError("MT5 endpoint must be a demo, paper, or localhost URL")
+                raise ValueError("endpoint is not an allowlisted HTTPS demo endpoint")
 
     @classmethod
     def from_environment(
         cls,
         *,
         data_dir: Path,
-        instrument: str = "EUR_USD",
+        instrument: str = DEFAULT_INSTRUMENT,
+        token: str | None = None,
+        account: str | None = None,
+        server: str | None = None,
+        endpoint: str | None = None,
+        bridge_host: str | None = None,
+        bridge_port: int | None = None,
+        environment: BrokerEnvironment | None = None,
+        runtime_mode: Literal["SIMULATED", "BROKER_DEMO"] | None = None,
+        future_tolerance_seconds: float = 0.0,
     ) -> BrokerConnectionConfig:
         raw_environment = os.getenv("BROKER_ENV", "demo") or "demo"
-        if raw_environment == "paper":
-            environment: BrokerEnvironment = "paper"
-        elif raw_environment == "demo":
-            environment = "demo"
+        selected_environment_value = environment or raw_environment
+        if selected_environment_value == "paper":
+            selected_environment: BrokerEnvironment = "paper"
+        elif selected_environment_value == "demo":
+            selected_environment = "demo"
         else:
             raise ValueError("BROKER_ENV must be paper or demo")
-        return cls(
-            token=os.getenv("BROKER_TOKEN") or None,
-            account=os.getenv("BROKER_ACCOUNT")
+        raw_mode = os.getenv("TRADING_MODE", "SIMULATED") or "SIMULATED"
+        selected_mode_value = runtime_mode or raw_mode
+        if selected_mode_value == "SIMULATED":
+            selected_mode: Literal["SIMULATED", "BROKER_DEMO"] = "SIMULATED"
+        elif selected_mode_value == "BROKER_DEMO":
+            selected_mode = "BROKER_DEMO"
+        else:
+            raise ValueError("TRADING_MODE must be SIMULATED or BROKER_DEMO")
+        raw_bridge_port = os.getenv("EXNESS_BRIDGE_PORT", "18812")
+        if bridge_port is None:
+            try:
+                selected_bridge_port = int(raw_bridge_port)
+            except ValueError as exc:
+                raise ValueError("EXNESS_BRIDGE_PORT must be an integer") from exc
+        else:
+            selected_bridge_port = bridge_port
+        selected_bridge_host = (
+            bridge_host
+            if bridge_host is not None
+            else os.getenv("EXNESS_BRIDGE_HOST") or None
+        )
+        selected_endpoint = (
+            endpoint
+            or os.getenv("BROKER_ENDPOINT")
+            or (
+                f"https://{selected_bridge_host}:{selected_bridge_port}"
+                if selected_bridge_host
+                else None
+            )
+        )
+        selected_token = (
+            token or os.getenv("EXNESS_PASSWORD") or os.getenv("BROKER_TOKEN")
+        )
+        selected_account = (
+            account
+            or os.getenv("EXNESS_LOGIN")
+            or os.getenv("BROKER_ACCOUNT")
             or os.getenv("BROKER_ACCOUNT_ID")
-            or None,
-            server=os.getenv("BROKER_SERVER") or None,
-            endpoint=os.getenv("BROKER_ENDPOINT") or None,
-            environment=environment,
+        )
+        selected_server = (
+            server or os.getenv("EXNESS_SERVER") or os.getenv("BROKER_SERVER")
+        )
+        return cls(
+            token=selected_token,
+            account=selected_account,
+            server=selected_server,
+            endpoint=selected_endpoint,
+            bridge_host=selected_bridge_host,
+            bridge_port=selected_bridge_port,
+            environment=selected_environment,
+            runtime_mode=selected_mode,
             instrument=instrument,
             fallback_data_path=data_dir / "market_data.csv",
+            future_tolerance_seconds=future_tolerance_seconds,
         )
 
 
@@ -154,49 +245,91 @@ class MT5QuoteSource:
         self.config = config
         self._fallback = fallback
         self._now = now or (lambda: datetime.now(timezone.utc))
-        self.mode: AdapterMode = "SIMULATED"
+        self.mode: AdapterMode = (
+            "BROKER_DEMO" if config.runtime_mode == "BROKER_DEMO" else "SIMULATED"
+        )
         self.fallback_reason: str | None = None
-        self._rest_adapter: MT5DemoAdapter | None = None
+        self._rest_adapter: ExnessMT5Broker | None = None
+        self._bridge_transport: ExnessMT5BridgeTransport | None = None
         self._native_source: _NativeMT5QuoteSource | None = None
 
-        if config.environment == "demo":
-            self.fallback_reason = "BROKER_ENV=demo uses the local paper feed"
+        if config.runtime_mode == "SIMULATED":
+            if config.environment == "demo":
+                self.fallback_reason = "BROKER_ENV=demo uses the local paper feed"
+            elif config.endpoint and config.account:
+                self.fallback_reason = "SIMULATED mode ignores broker configuration"
+            else:
+                self.fallback_reason = "SIMULATED mode uses the local paper feed"
             return
-        if config.endpoint and config.account:
-            self._rest_adapter = MT5DemoAdapter(
-                transport or UrllibTransport(),
+        if config.environment != "demo":
+            self.fallback_reason = "BROKER_ENV must be demo for BROKER_DEMO"
+            return
+        if config.endpoint and config.account and config.token:
+            bridge_transport: BrokerTransport
+            if transport is not None:
+                bridge_transport = transport
+            else:
+                self._bridge_transport = ExnessMT5BridgeTransport(config.endpoint)
+                bridge_transport = self._bridge_transport
+            self._rest_adapter = ExnessMT5Broker(
+                bridge_transport,
                 base_url=config.endpoint,
                 account_id=config.account,
-                environment="PAPER",
+                environment="DEMO",
                 api_token=config.token,
+                future_tolerance_seconds=config.future_tolerance_seconds,
                 now=self._now,
             )
-            self.mode = "REST"
+            self.mode = "BROKER_DEMO"
             return
-        if config.token and config.account and config.server:
-            try:
-                self._native_source = _NativeMT5QuoteSource(
-                    token=config.token,
-                    account=config.account,
-                    server=config.server,
-                    now=self._now,
-                )
-                self.mode = "NATIVE"
-                return
-            except (ImportError, OSError, ValueError) as exc:
-                self.fallback_reason = f"MT5 bindings unavailable: {type(exc).__name__}"
-        else:
-            self.fallback_reason = "MT5 credentials or server are unavailable"
+        missing_fields = tuple(
+            name
+            for name, value in (
+                ("endpoint", config.endpoint),
+                ("account", config.account),
+                ("token", config.token),
+            )
+            if not value
+        )
+        self.fallback_reason = "BROKER_DEMO missing " + ", ".join(missing_fields)
+
+    def health_check(
+        self,
+        *,
+        expected_server: str,
+        expected_account_id: str,
+        max_clock_drift_seconds: float,
+    ) -> BridgeHealth:
+        if self._bridge_transport is None:
+            raise BrokerConnectionError("MT5 bridge transport is unavailable")
+        return self._bridge_transport.assert_ready(
+            expected_server=expected_server,
+            expected_account_id=expected_account_id,
+            max_clock_drift_seconds=max_clock_drift_seconds,
+            now=self._now(),
+        )
+
+    @property
+    def broker(self) -> ExnessMT5Broker | None:
+        """Return the REST broker when BROKER_DEMO is configured."""
+        return self._rest_adapter
 
     def poll_quote(self, instrument: str | None = None) -> MarketQuote:
         symbol = instrument or self.config.instrument
-        try:
-            if self._rest_adapter is not None:
+        if self.config.runtime_mode == "BROKER_DEMO":
+            if self._rest_adapter is None:
+                raise BrokerConnectionError(
+                    self.fallback_reason or "broker is unavailable"
+                )
+            try:
                 return self._rest_adapter.get_market_quote(symbol)
-            if self._native_source is not None:
-                return self._native_source.poll_quote(symbol)
-        except (BrokerConnectionError, ValueError, OSError):
-            self.fallback_reason = "MT5 quote polling failed; using local paper feed"
+            except (BrokerConnectionError, ValueError, OSError):
+                self.fallback_reason = "MT5 quote polling failed"
+                raise
+        if self._rest_adapter is not None:
+            return self._rest_adapter.get_market_quote(symbol)
+        if self._native_source is not None:
+            return self._native_source.poll_quote(symbol)
         return self._fallback.poll_quote(symbol)
 
 
@@ -213,6 +346,47 @@ class MT5BrokerAdapter:
     @property
     def fallback_reason(self) -> str | None:
         return self.source.fallback_reason
+
+    @property
+    def broker(self) -> ExnessMT5Broker | None:
+        """Return the configured broker gateway for readiness/reconciliation."""
+        return self.source.broker
+
+    def health_check(
+        self,
+        *,
+        expected_server: str,
+        expected_account_id: str,
+        max_clock_drift_seconds: float,
+    ) -> BridgeHealth:
+        return self.source.health_check(
+            expected_server=expected_server,
+            expected_account_id=expected_account_id,
+            max_clock_drift_seconds=max_clock_drift_seconds,
+        )
+
+    def get_instrument_metadata(self, instrument: str) -> InstrumentMetadata:
+        if self.broker is None:
+            raise BrokerConnectionError("broker-demo adapter is unavailable")
+        return self.broker.get_instrument_metadata(instrument)
+
+    def get_trading_session(self, instrument: str) -> TradingSession:
+        if self.broker is None:
+            raise BrokerConnectionError("broker-demo adapter is unavailable")
+        return self.broker.get_trading_session(instrument)
+
+    def get_historical_candles(
+        self,
+        instrument: str,
+        *,
+        timeframe: Literal["15m", "1h"] = "15m",
+        limit: int = 256,
+    ) -> tuple[MarketCandle, ...]:
+        if self.broker is None:
+            raise BrokerConnectionError("broker-demo adapter is unavailable")
+        return self.broker.get_historical_candles(
+            instrument, timeframe=timeframe, limit=limit
+        )
 
     def poll_quote(self, instrument: str | None = None) -> MarketQuote:
         return self.source.poll_quote(instrument)

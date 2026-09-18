@@ -1,5 +1,7 @@
 # Product Specification: Hybrid Algorithmic & AI Forex Trading System
 
+> **Status and authority:** This product specification is retained as historical context. Current delivery status and broker-demo acceptance are governed by `ROADMAP.md`, `docs/PHASE-0-SECURE-BASELINE-SPEC.md`, `docs/PAPER-TRADING-READINESS.md`, and `TODO.md`. The primary broker target is Exness MT5 behind `BaseBroker`; local testing uses `SimulatedBroker`. OANDA was evaluated and discarded; do not add OANDA implementation work. Local simulation is not broker connectivity.
+
 ## 1. Product definition
 
 Build a risk-managed, educational, semi-automated Forex trading system that combines:
@@ -22,12 +24,11 @@ Market OHLC feeds -> Technical Engine --------┘
 
 | Phase | Outcome | In scope |
 | --- | --- | --- |
-| Phase 0 | Environment and architecture setup | Python 3.11+, virtual environment, Docker, Docker Compose, and core dependencies. |
-| Phase 1 | Backtesting foundation | Historical 15-minute EUR/USD CSV data and deterministic RSI + moving-average-crossover strategy. |
+| Phase 0 | Secure and freeze the baseline | Explicit runtime modes, credential hygiene, documentation reconciliation, reproducible local simulation, and recorded evidence. |
+| Phase 1 | Backtesting foundation | Historical 15-minute EUR/USD data and deterministic RSI + moving-average-crossover strategy. |
 | Phase 2 | Custom risk engine | Dynamic lot sizing and ATR-based trailing stop-loss behavior. |
-| Phase 3 | LLM sentiment integration | Financial-news ingestion and OpenAI/Ollama structured JSON sentiment classification. |
-| Phase 4 | Paper-trading pipeline | OANDA v20 or MT5 demo execution and SQLite/PostgreSQL execution metrics, slippage, latency, sentiment, and news persistence. |
-
+| Phase 3 | LLM sentiment integration | Financial-news ingestion and strict JSON sentiment classification. |
+| Phase 4 | Broker-connected demo pipeline | Exness MT5 demo connectivity, broker-aware risk, protected demo orders, reconciliation, and operational evidence. |
 The LLM is an analyst and filter. It never submits, modifies, or cancels an order. The technical engine emits signals; risk management produces approved order intents; only execution submits provider orders.
 
 ## 3. Functional requirements
@@ -38,8 +39,7 @@ The LLM is an analyst and filter. It never submits, modifies, or cancels an orde
 
 - Load historical 15-minute EUR/USD candles from CSV for Phase 1.
 - Normalize OHLC records into typed models and preserve chronological ordering.
-- Reject malformed, non-finite, non-positive, or internally inconsistent candles.
-- Support OANDA/MT5 WebSocket market data in later paper-trading phases.
+- Support Exness MT5 demo market data in the first broker-demo phase. OANDA is discarded; no OANDA implementation is in scope.
 - Track data freshness and block new entries after a WebSocket drop, market-data gap, or stale price condition.
 
 #### TE-2: Indicators and strategy
@@ -133,14 +133,13 @@ A zero or invalid stop distance is rejected. No static lot size may bypass the c
 #### EX-1: Single execution boundary
 
 - Only the execution wrapper may submit broker orders.
-- Supported providers are OANDA v20 REST and MetaTrader 5.
-- The initial target is an OANDA/MT5 paper or demo account.
+- Supported broker implementation is Exness MT5 behind `BaseBroker`; local paper testing uses `SimulatedBroker`.
+- The initial target is the Exness MT5 demo account, including the verified micro-lot instrument `XAUUSDm`.
 - Strategies, indicators, sentiment clients, notebooks, and data feeds must not call broker APIs directly.
 
 #### EX-2: Provider payloads
 
-- Map typed order intents to provider-specific OANDA/MT5 payloads.
-- Preserve direction, quantity, entry, hard stop-loss, take-profit, account equity, risk fraction, and client order ID.
+- Map typed order intents to the `ExnessMT5Broker` payload while preserving direction, quantity, entry, hard stop-loss, take-profit, account equity, risk fraction, and client order ID.
 - Reject the order if the provider payload cannot carry the mandatory exits or if the environment is not paper/demo.
 
 #### EX-3: Session and market safety
@@ -160,9 +159,9 @@ A zero or invalid stop distance is rejected. No static lot size may bypass the c
 
 Phase 1 is only the deterministic backtesting foundation. It does **not** include:
 
-1. OANDA or MetaTrader 5 connections, whether live or paper.
+1. OANDA integration and implementation.
 2. Live-money execution or any live-account endpoint.
-3. Broker order placement, modification, cancellation, or reconciliation.
+3. Broker order placement, modification, cancellation, or reconciliation before the demo contract is verified.
 4. OpenAI/Ollama calls, LLM sentiment scoring, or news polling.
 5. Sentiment confirmation/rejection as an execution gate.
 6. Provider-classified news blackout enforcement in the runtime pipeline.

@@ -1,5 +1,7 @@
 # Implementation Plan: Containerized Hybrid Forex Trading Bot
 
+> **Status and authority:** This plan is retained as a historical task inventory. Phase status and active acceptance criteria are governed by `ROADMAP.md`, `docs/PHASE-0-SECURE-BASELINE-SPEC.md`, `docs/PAPER-TRADING-READINESS.md`, and `docs/SPEC-DRIVEN-DEVELOPMENT.md`. The first broker-demo implementation is Exness MT5 behind `BaseBroker`; `SimulatedBroker` is used for local paper testing. OANDA work is discarded and must not be added. Planned files are not evidence of implementation.
+
 ## 1. Execution contract
 
 - Execute high-level tasks in phase order and subtasks in numeric order.
@@ -388,24 +390,9 @@ The image, Compose services, build context, dependencies, runtime flags, volumes
 - **Primary Docker Command:** `docker compose run --rm app pytest tests/unit/test_execution_contracts.py`
 - **Fallback Local Command:** `pytest tests/unit/test_execution_contracts.py`
 
-### Task 19: Implement the OANDA v20 demo adapter
+### Task 19: Discarded OANDA integration
 
-#### Task 19.1: Map canonical payloads to OANDA requests
-
-- **Deliverable:** The adapter maps a validated canonical payload to an OANDA v20 demo request with direction, quantity, client ID, and both hard exits.
-- **Target Implementation File:** `src/execution/oanda.py`
-- **Target Test File:** `tests/integration/test_oanda_adapter.py`
-- **Primary Docker Command:** `docker compose run --rm app pytest tests/integration/test_oanda_adapter.py`
-- **Fallback Local Command:** `pytest tests/integration/test_oanda_adapter.py`
-
-#### Task 19.2: Normalize OANDA responses and failures
-
-- **Deliverable:** Accepted, rejected, timeout, and malformed OANDA responses become sanitized provider-neutral execution results without live endpoint access.
-- **Target Implementation File:** `src/execution/oanda.py`
-- **Target Test File:** `tests/integration/test_oanda_adapter.py`
-- **Primary Docker Command:** `docker compose run --rm app pytest tests/integration/test_oanda_adapter.py`
-- **Fallback Local Command:** `pytest tests/integration/test_oanda_adapter.py`
-
+OANDA was evaluated and rejected because of regional/account friction and lack of support for the required local payment rails. Do not implement, test, or extend an OANDA adapter. The active broker task is Exness MT5 behind `BaseBroker`; see `TODO.md` and the Phase 0 specification.
 ### Task 20: Implement the MetaTrader 5 demo adapter
 
 #### Task 20.1: Map canonical payloads to MT5 requests

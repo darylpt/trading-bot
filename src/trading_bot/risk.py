@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from risk.sizing import calculate_position_size, risk_amount
+from trading_bot.config import DAILY_DRAWDOWN_LIMIT
 from trading_bot.strategy import Signal
 
 MAX_RISK_FRACTION = Decimal("0.01")
@@ -36,10 +37,11 @@ def _rejected(
 def evaluate_signal(
     signal: Signal,
     *,
+    instrument: str | None = None,
     account_equity: Decimal | None,
     session_start_equity: Decimal | None,
     stop_distance: Decimal | None,
-    daily_drawdown_limit: Decimal = Decimal("0.05"),
+    daily_drawdown_limit: Decimal = DAILY_DRAWDOWN_LIMIT,
     risk_fraction: Decimal = MAX_RISK_FRACTION,
     contract_size: Decimal = Decimal("1"),
     pip_value: Decimal = Decimal("1"),
@@ -47,15 +49,16 @@ def evaluate_signal(
     maximum_size: Decimal | None = None,
     quantity_step: Decimal = Decimal("0.01"),
 ) -> RiskDecision:
-    """Approve a signal only when equity, drawdown, exits, and size are valid."""
+    """Approve a signal only when its target matches the evaluated instrument."""
+    if instrument is not None and signal.instrument != instrument:
+        return _rejected("INSTRUMENT_MISMATCH")
     if signal.action == "HOLD":
         return _rejected("HOLD_SIGNAL")
     if signal.action not in {"BUY", "SELL"}:
         return _rejected("INVALID_SIGNAL_ACTION")
-    if not daily_drawdown_limit.is_finite() or not (
-        Decimal("0") < daily_drawdown_limit <= Decimal("1")
-    ):
+    if not daily_drawdown_limit.is_finite() or daily_drawdown_limit <= 0:
         return _rejected("INVALID_DAILY_DRAWDOWN_LIMIT")
+    effective_daily_drawdown_limit = min(daily_drawdown_limit, DAILY_DRAWDOWN_LIMIT)
     if not risk_fraction.is_finite() or not (
         Decimal("0") < risk_fraction <= MAX_RISK_FRACTION
     ):
@@ -66,12 +69,11 @@ def evaluate_signal(
         return _rejected("ACCOUNT_EQUITY_INVALID")
     if account_equity <= 0 or session_start_equity <= 0:
         return _rejected("ACCOUNT_EQUITY_INVALID")
-
     drawdown_fraction = max(
         (session_start_equity - account_equity) / session_start_equity,
         Decimal("0"),
     )
-    if drawdown_fraction >= daily_drawdown_limit:
+    if drawdown_fraction >= effective_daily_drawdown_limit:
         return _rejected(
             "DAILY_DRAWDOWN_LIMIT_REACHED",
             drawdown_fraction=drawdown_fraction,
@@ -82,7 +84,6 @@ def evaluate_signal(
         return _rejected("ENTRY_PRICE_INVALID", drawdown_fraction=drawdown_fraction)
     if stop_distance is None or not stop_distance.is_finite() or stop_distance <= 0:
         return _rejected("STOP_DISTANCE_INVALID", drawdown_fraction=drawdown_fraction)
-
     stop_loss_price = (
         signal.reference_price - stop_distance
         if signal.action == "BUY"
@@ -114,7 +115,6 @@ def evaluate_signal(
             f"POSITION_SIZE_REJECTED: {exc}",
             drawdown_fraction=drawdown_fraction,
         )
-
     return RiskDecision(
         approved=True,
         reason="APPROVED",

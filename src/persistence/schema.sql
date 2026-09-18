@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS trade_logs (
     take_profit_price NUMERIC NOT NULL,
     account_equity NUMERIC NOT NULL,
     risk_fraction NUMERIC NOT NULL CHECK (risk_fraction <= 0.01),
-    status TEXT NOT NULL CHECK (status IN ('ACCEPTED', 'REJECTED', 'UNKNOWN')),
+    status TEXT NOT NULL CHECK (status IN ('PENDING_SUBMISSION', 'PENDING', 'FILLED', 'PARTIALLY_FILLED', 'ACCEPTED', 'REJECTED', 'CANCELLED', 'EXPIRED', 'UNKNOWN')),
     environment TEXT NOT NULL CHECK (environment IN ('PAPER', 'DEMO')),
     rejection_reason TEXT,
     opened_at TEXT NOT NULL
@@ -17,10 +17,17 @@ CREATE TABLE IF NOT EXISTS trade_logs (
 CREATE TABLE IF NOT EXISTS execution_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     client_order_id TEXT,
+    instrument TEXT NOT NULL DEFAULT 'UNKNOWN',
+    strategy_name TEXT NOT NULL DEFAULT 'ema_crossover',
     event_type TEXT NOT NULL,
     provider TEXT NOT NULL,
     error_class TEXT,
     message TEXT NOT NULL,
+    decision_rationale TEXT,
+    reference_price NUMERIC,
+    fast_average NUMERIC,
+    slow_average NUMERIC,
+    distance_to_crossover NUMERIC,
     latency_ms INTEGER,
     slippage NUMERIC,
     created_at TEXT NOT NULL
@@ -53,4 +60,20 @@ CREATE TABLE IF NOT EXISTS positions (
     exit_price NUMERIC,
     exit_reason TEXT,
     realized_pnl NUMERIC NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS circuit_breaker_status (
+    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    status TEXT NOT NULL CHECK (status IN ('CLEAR', 'HALTED')),
+    reason TEXT NOT NULL,
+    candle_timestamp TEXT,
+    spread NUMERIC,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runtime_controls (
+    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    trading_halted INTEGER NOT NULL CHECK (trading_halted IN (0, 1)),
+    reason TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );

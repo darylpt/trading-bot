@@ -2,6 +2,17 @@
 
 This roadmap is the delivery contract for the paper/demo trading system. Work advances in phase order and preserves fail-closed risk and execution boundaries.
 
+## Phase 0 — Secure and Freeze the Baseline (Implemented locally / unverified)
+
+- Establish explicit `SIMULATED`, `BROKER_DEMO`, and unavailable `LIVE` runtime modes.
+- Select Exness MT5 as the broker-demo architecture behind `BaseBroker`; retain `SimulatedBroker` for local paper testing.
+- Rotate exposed credentials and prove secret exclusion/redaction.
+- Reconcile all planning and specification documents with the canonical readiness and SDD documents.
+- Freeze a reproducible local simulation baseline with configuration, dependency, fixture, schema, and command evidence.
+- Complete the acceptance scenarios in `docs/PHASE-0-SECURE-BASELINE-SPEC.md`.
+
+Phase 0 is implemented locally but is not verified until its external/demo evidence is recorded. The governing contract is `docs/PHASE-0-SECURE-BASELINE-SPEC.md`; the local evidence manifest is `docs/PHASE-0-BASELINE-MANIFEST.md`.
+
 ## Phase 1 — Runtime Foundation (Complete)
 
 - Containerize the Python 3.11 runtime with Docker Compose.
@@ -36,13 +47,34 @@ This roadmap is the delivery contract for the paper/demo trading system. Work ad
 - Reconcile fills and position state without bypassing the execution gate.
 - Update `session_metrics.db` with position, realized P&L, and win/loss outcomes.
 
-## Phase 5 — Exness MT5 Bridge (Complete)
+## Phase 5 — Broker-Connected Demo Trading (Not complete)
 
-- Integrate a demo-safe Exness MT5 adapter using `BROKER_TOKEN`, `BROKER_ACCOUNT`, `BROKER_SERVER`, and `BROKER_ENDPOINT`.
-- Fall back to the local simulated feed for `BROKER_ENV=demo` and unavailable MT5 bindings.
-- Poll bid/ask quotes and aggregate midpoint OHLCV bars into `market_data.csv`.
-- Wire the gateway into scheduled `run_tick()` execution using `TICK_INTERVAL_SECONDS`.
-- Preserve credential isolation, stale-data rejection, idempotency, and fail-closed behavior.
+- Implement the Exness MT5 demo deployment and adapter contract behind `BaseBroker`.
+- Separate `SIMULATED` and `BROKER_DEMO` modes; broker-demo failures MUST halt entries rather than use local fallback data.
+- Authenticate the demo account and validate account state, instrument metadata, trading session, quote freshness, clock drift, and database readiness.
+- Backfill and persist broker candles, aggregation state, bid/ask quotes, and provider timestamps.
+- Route demo orders through the single execution gate.
+- Confirm broker-side stop-loss and take-profit attachment before treating a position as protected.
+- Add client idempotency, partial/unknown-order handling, broker-position reconciliation, and restart recovery.
+- Prove the complete lifecycle with an opt-in demo smoke test.
+
+## Phase 6 — Operational Hardening (Not complete)
+
+- Upgrade process health into explicit trading-readiness states.
+- Persist sanitized decision, quote, risk, order, fill, reconciliation, halt, and recovery records.
+- Add alerts for disconnects, stale data, clock drift, unprotected positions, unknown orders, reconciliation mismatches, drawdown halts, database failures, and fallback activation.
+- Resolve SQLite/PostgreSQL ownership and remove unused hard startup dependencies.
+- Add failure-injection coverage for provider, data, risk, execution, persistence, and restart failures.
+
+## Phase 7 — Controlled Forward Test (Not complete)
+
+- Run a multi-day demo-only forward test with no live endpoint or live credentials.
+- Measure uptime, data continuity, spread, slippage, latency, rejected orders, protective-exit confirmation, P&L reconciliation, and restart recovery.
+- Review every halt and unexplained mismatch before changing strategy complexity or risk.
+
+The canonical requirements and acceptance evidence for Phases 5–7 are in `docs/PAPER-TRADING-READINESS.md`.
+
+All phases now have both a strategic contract and an executable slice contract in `docs/PHASE-*-SPEC.md`. These contracts define implementation ownership, state transitions, failure policy, acceptance scenarios, smoke scenarios, verification commands, and exit gates. Contract creation does not advance phase status: Phase 0 remains proposed until its evidence gates pass.
 
 ## Resume Verification
 

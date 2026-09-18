@@ -16,7 +16,16 @@ _SENSITIVE_NAMES = ("key", "token", "secret", "password", "authorization", "acco
 LifecycleSignal = str | None
 NewsBlackoutStatus = Literal["BLOCKED", "CLEAR", "NOT_CHECKED"]
 LLMDecision = Literal["CONFIRM", "REJECT", "ADJUST_RISK"] | None
-ExecutionStatus = Literal["ACCEPTED", "REJECTED", "UNKNOWN", "NOT_ATTEMPTED"]
+ExecutionStatus = Literal[
+    "ACCEPTED",
+    "FILLED",
+    "PARTIALLY_FILLED",
+    "REJECTED",
+    "CANCELLED",
+    "EXPIRED",
+    "UNKNOWN",
+    "NOT_ATTEMPTED",
+]
 
 
 class TradeLifecycleEvent(BaseModel):
@@ -113,4 +122,21 @@ def record_event(
     """Log and return only sanitized event fields."""
     safe = sanitize_fields(fields, secrets=secrets)
     logger.info("event=%s fields=%s", event_type, safe)
+    return safe
+
+
+def emit_alert(
+    logger: logging.Logger,
+    condition: str,
+    *,
+    message: str,
+    fields: Mapping[str, str] | None = None,
+    secrets: tuple[str, ...] = (),
+) -> dict[str, str]:
+    """Emit a sanitized non-trading alert without changing runtime state."""
+    safe = sanitize_fields(
+        {"condition": condition, "message": message, **dict(fields or {})},
+        secrets=secrets,
+    )
+    logger.warning("alert=%s", json.dumps(safe, sort_keys=True))
     return safe

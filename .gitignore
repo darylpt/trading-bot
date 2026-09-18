@@ -13,6 +13,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+mt5_bridge_cert.pem
+mt5_bridge_key.pem
 
 # Local data, logs, and databases
 data/*

@@ -2,7 +2,9 @@
 
 ## Runtime Boundaries
 
-The application is a paper/demo-only, fail-closed trading system:
+The application is a paper/demo-only, fail-closed trading system. Broker-connected demo trading and local simulation are separate runtime modes; broker-demo mode MUST NOT silently fall back to simulated data.
+
+The canonical Phase 0 contract is `docs/PHASE-0-SECURE-BASELINE-SPEC.md`; readiness requirements are in `docs/PAPER-TRADING-READINESS.md`; SDD workflow is in `docs/SPEC-DRIVEN-DEVELOPMENT.md`; persistent tasks are in `TODO.md`.
 
 ```text
 market data -> strategy signal -> risk approval -> execution gate -> broker adapter
@@ -14,41 +16,43 @@ market data -> strategy signal -> risk approval -> execution gate -> broker adap
 - `src/trading_bot/strategy.py` emits typed `BUY`/`SELL`/`HOLD` crossover signals.
 - `src/sentiment/` validates strict JSON sentiment and news blackout state. Sentiment never submits orders.
 - `src/trading_bot/risk.py` is the Phase 3 pre-trade risk boundary.
-- `src/trading_bot/execution.py` is the Phase 4 paper execution boundary: it fills approved orders, persists positions, evaluates protective and counter-signal exits, and records realized P&L.
-- `src/trading_bot/broker/` owns MT5 demo connection selection, local fallback quotes, and midpoint bar aggregation into `market_data.csv`.
-- `src/risk/` contains reusable sizing, ATR exits, and order-risk calculations.
-- `src/execution/` contains broker-neutral payloads, adapters, reconciliation, and the rejecting execution gate.
+- `src/trading_bot/execution.py` is the local simulation boundary: it fills approved simulated orders, persists positions, evaluates protective and counter-signal exits, and records realized P&L.
+- `src/trading_bot/broker/` owns `SimulatedBroker` for local paper testing and `ExnessMT5Broker` for the explicit demo/live boundary.
+- `src/execution/` contains the standard `BaseBroker` abstraction, broker-neutral payloads, reconciliation, and the rejecting execution gate.
 - `src/persistence/` owns SQLite schema creation, operational writes, session metrics, and the cross-shell CLI.
 - `src/observability/` owns sanitized lifecycle logging and forward-test readiness checks.
 - `src/trading_bot/__main__.py` orchestrates startup, one tick, and daemon scheduling; it does not bypass strategy, risk, or execution boundaries.
 
-## Environment Variables
+The normal runtime is not considered broker-connected paper trading until it proves demo authentication, account and instrument validation, broker order submission, protective-exit confirmation, idempotency, reconciliation, restart recovery, and the forward-test gates in `docs/PAPER-TRADING-READINESS.md`.
 
-All values below are safe paper/demo defaults. Secrets are injected at runtime only.
+## Environment Variables
 
 | Variable | Default | Contract |
 | --- | --- | --- |
+| `TRADING_MODE` | `SIMULATED` | Explicitly selects `SIMULATED` or `BROKER_DEMO`; `LIVE` is rejected. |
 | `PAPER_TRADING` | `true` | Must remain true for local/container execution. |
 | `LIVE_TRADING` | `false` | Must remain false by default. |
-| `BROKER_ENV` | `demo` | Allowed values: `paper`, `demo`; demo mode uses the local simulated feed. |
-| `BROKER_PROVIDER` | `mt5` in Compose, `oanda` in settings | Selects the provider adapter. |
-| `BROKER_ENDPOINT` | unset | Optional demo/practice MT5 REST bridge URL. |
-| `BROKER_TOKEN` | local demo placeholder | Runtime credential; never commit a real token. |
-| `BROKER_ACCOUNT` | unset | Optional MT5 demo account identifier; missing values use local fallback. |
-| `BROKER_SERVER` | unset | Optional Exness MT5 demo server name; missing values use local fallback. |
-| `DAILY_DRAWDOWN_LIMIT` | `0.05` | Daily loss fraction used by Phase 3 risk guardrails. |
+| `BROKER_PROVIDER` | `exness_mt5` | Exness MT5 is the primary broker-demo provider behind `BaseBroker`; `SimulatedBroker` is used locally. |
+| `BROKER_ENDPOINT` | unset in simulation | Required and allowlisted for `BROKER_DEMO`; never accepts live endpoints. |
+| `BROKER_TOKEN` | unset in simulation | Required only at runtime for `BROKER_DEMO`; never committed or logged. |
+| `BROKER_ACCOUNT` | unset in simulation | Required for `BROKER_DEMO`. |
+| `DAILY_DRAWDOWN_LIMIT` | explicit configuration | Positive validated limit; no unsafe production fallback. |
 | `TICK_INTERVAL_SECONDS` | `60` | Positive daemon interval; `--interval` may override it. |
-| `DATA_DIR` | `data` locally, `/app/data` in Compose | Holds `market_data.csv` and `session_metrics.db`. |
+| `DATA_DIR` | `data` locally, `/app/data` in Compose | Holds simulation data and persisted records. |
 | `LOG_DIR` | `logs` locally, `/app/logs` in Compose | Operational logs. |
-| `MARKET_DATA_PATH` | unset | Optional OHLCV CSV override; otherwise `DATA_DIR/market_data.csv`. |
-| `ACCOUNT_EQUITY` | unset | Current paper account equity; missing values reject BUY/SELL signals. |
-| `SESSION_START_EQUITY` | unset | Session baseline equity used for drawdown calculation. |
-| `RISK_STOP_DISTANCE` | unset | Positive stop distance used for position sizing; missing values reject BUY/SELL signals. |
-| `SENTIMENT_PROVIDER` | `openai` | Strict JSON sentiment provider. |
-| `OLLAMA_BASE_URL` | unset | Optional local Ollama URL. |
-| `DATABASE_URL` | unset locally | Optional PostgreSQL service URL; SQLite remains the initial persistence path. |
+| `MARKET_DATA_PATH` | unset | Simulation-only OHLCV CSV override. |
+| `ACCOUNT_EQUITY` | unset | Simulation-test input only; broker-demo reads live account state. |
+| `SESSION_START_EQUITY` | unset | Simulation-test input only; broker-demo derives session baseline safely. |
+| `RISK_STOP_DISTANCE` | unset | Simulation-test input only; broker-demo calculates stop distance. |
+| `MAX_DATA_AGE_SECONDS` | `300` | Positive freshness limit. |
+| `MAX_CLOCK_DRIFT_SECONDS` | `5` | Positive clock-drift limit. |
+| `MAX_SPREAD` | explicit configuration | Positive validated spread tolerance; zero must not silently disable safety. |
+| `SENTIMENT_PROVIDER` | `openai` | Strict JSON sentiment provider when sentiment is enabled. |
+| `DATABASE_URL` | unset locally | Optional until persistence backend ownership is finalized. |
 
-Missing values must resolve to safe demo defaults or fail closed. Empty values are treated as missing. Real credentials must never be replaced with a value that could authorize live trading.
+Mode selection is explicit. Missing broker-demo settings reject startup; broker-demo provider failures halt new entries and reconcile existing state rather than using simulated data. See `docs/PHASE-0-SECURE-BASELINE-SPEC.md`.
+
+Missing values must resolve to safe simulation defaults only in `SIMULATED`; required broker-demo values fail closed. Empty values are treated as missing. Real credentials must never be replaced with a value that could authorize live trading.
 
 ## Repository Structure
 
@@ -64,8 +68,7 @@ Missing values must resolve to safe demo defaults or fail closed. Empty values a
 │   ├── sentiment/               # News and strict JSON LLM contracts
 │   ├── strategy/                # Candle loading and deterministic indicators
 │   └── trading_bot/             # Entrypoint, orchestration, signals, seeding
-│       └── broker/              # MT5 demo adapter, fallback, quote aggregation
-├── tests/unit/                  # Pure validation and calculation tests
+│       └── broker/              # SimulatedBroker and ExnessMT5Broker boundaries
 ├── tests/integration/           # Pipeline, persistence, and adapter contracts
 ├── Dockerfile                  # Python 3.11-slim deterministic image
 ├── docker-compose.yml           # app, test, and PostgreSQL services
@@ -118,10 +121,12 @@ python -m compileall -q src tests
 ```
 
 - Tests assert observable behavior, rejection paths, limits, transitions, and persistence invariants.
-- External providers use deterministic fakes in tests; no live credentials or live endpoints are used.
+- External providers use deterministic fakes in unit tests. A separate opt-in demo smoke test is required to prove real broker connectivity; it MUST use demo credentials and an allowlisted demo endpoint.
 - Every new exported contract requires caller coverage and strict type checking.
 - Risk and execution changes require an affected paper/demo smoke test in addition to unit tests.
 - Docker verification uses the Compose `test` service and safe runtime environment values.
+
+The complete readiness definition, operational failure scenarios, security requirements, and multi-day forward-test gate are maintained in `docs/PAPER-TRADING-READINESS.md`.
 
 ## Resume Verification Command
 

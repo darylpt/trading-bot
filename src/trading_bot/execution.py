@@ -8,12 +8,22 @@ from decimal import Decimal
 from typing import Literal, Sequence
 
 from domain.models import MarketCandle, OrderIntent
+from execution.broker_adapter import (
+    BrokerAccountState,
+    BrokerConnectionError,
+    InstrumentMetadata,
+    MarketQuote,
+    ExnessMT5Broker,
+)
+from execution.executor import ExecutionGate
 from persistence.sqlite import (
     ExecutionLogRecord,
     PositionRecord,
     SQLiteRepository,
     TradeRecord,
 )
+from risk.limits import validate_broker_order_risk
+from risk.sizing import calculate_broker_position_size
 from trading_bot.risk import RiskDecision
 from trading_bot.strategy import Signal
 
@@ -186,6 +196,7 @@ class PaperExecutionEngine:
         self._repository.save_execution_log(
             ExecutionLogRecord(
                 client_order_id=order.client_order_id,
+                instrument=order.instrument,
                 event_type="PAPER_FILLED",
                 provider="paper",
                 error_class=None,
@@ -224,6 +235,7 @@ class PaperExecutionEngine:
             self._repository.save_execution_log(
                 ExecutionLogRecord(
                     client_order_id=position.client_order_id,
+                    instrument=position.instrument,
                     event_type="PAPER_CLOSED",
                     provider="paper",
                     error_class=None,
@@ -269,3 +281,171 @@ class PaperExecutionEngine:
         if position.direction == "LONG":
             return (exit_price - position.entry_price) * position.quantity
         return (position.entry_price - exit_price) * position.quantity
+
+
+class BrokerDemoExecutionEngine:
+    """Submit broker-demo orders through the single rejecting execution gate."""
+
+    def __init__(
+        self,
+        repository: SQLiteRepository,
+        broker: "ExnessMT5Broker",
+        *,
+        max_spread: Decimal,
+        take_profit_multiple: Decimal = Decimal("2"),
+    ) -> None:
+        self._repository = repository
+        self._broker = broker
+        self._max_spread = max_spread
+        self._take_profit_multiple = take_profit_multiple
+
+    def process_tick(
+        self,
+        candles: Sequence[MarketCandle],
+        *,
+        signal: Signal | None,
+        risk_decision: RiskDecision | None,
+        account_equity: Decimal | None,
+        current_time: datetime | None = None,
+    ) -> ExecutionOutcome:
+        """Re-read broker state, submit at most one order, and reconcile its fill."""
+        if not candles:
+            return ExecutionOutcome(rejection_reason="NO_MARKET_DATA")
+        if signal is None or risk_decision is None or not risk_decision.approved:
+            return ExecutionOutcome(
+                rejection_reason=(
+                    "NO_APPROVED_SIGNAL"
+                    if risk_decision is None
+                    else risk_decision.reason
+                )
+            )
+        timestamp = current_time or datetime.now(timezone.utc)
+        try:
+            account = self._broker.get_account_snapshot()
+            if any(
+                position.instrument == signal.instrument
+                for position in account.open_positions
+            ):
+                return ExecutionOutcome(rejection_reason="POSITION_ALREADY_OPEN")
+            quote = self._broker.get_market_quote(signal.instrument)
+            metadata = self._broker.get_instrument_metadata(signal.instrument)
+            order = self._build_order(
+                signal,
+                risk_decision,
+                account=account,
+                quote=quote,
+                metadata=metadata,
+                timestamp=timestamp,
+            )
+            gate = ExecutionGate(
+                self._broker,
+                environment="DEMO",
+                repository=self._repository,
+                revalidate=self._revalidate,
+            )
+            result = gate.submit(order)
+            if result.status not in {"FILLED", "PARTIALLY_FILLED"}:
+                return ExecutionOutcome(
+                    rejection_reason=result.rejection_reason or result.status
+                )
+            refreshed = self._broker.get_account_snapshot()
+            matching = next(
+                (
+                    position
+                    for position in refreshed.open_positions
+                    if position.instrument == order.instrument
+                    and position.direction == order.direction
+                ),
+                None,
+            )
+            if matching is None:
+                self._repository.set_trading_halt(
+                    True, reason="filled broker order was not reconciled"
+                )
+                return ExecutionOutcome(
+                    rejection_reason="BROKER_POSITION_NOT_RECONCILED"
+                )
+            position = PositionRecord(
+                position_id=order.client_order_id,
+                client_order_id=order.client_order_id,
+                instrument=matching.instrument,
+                direction=matching.direction,
+                quantity=matching.quantity,
+                entry_price=matching.entry_price,
+                stop_loss_price=order.stop_loss_price,
+                take_profit_price=order.take_profit_price,
+                status="OPEN",
+                opened_at=timestamp,
+            )
+            self._repository.save_position(position)
+            return ExecutionOutcome(opened_position=position)
+        except (
+            BrokerConnectionError,
+            TimeoutError,
+            ConnectionError,
+            ValueError,
+        ) as exc:
+            self._repository.set_trading_halt(
+                True, reason=f"broker demo execution failed: {type(exc).__name__}"
+            )
+            return ExecutionOutcome(rejection_reason=type(exc).__name__)
+
+    def _build_order(
+        self,
+        signal: Signal,
+        risk_decision: RiskDecision,
+        *,
+        account: BrokerAccountState,
+        quote: MarketQuote,
+        metadata: InstrumentMetadata,
+        timestamp: datetime,
+    ) -> OrderIntent:
+        if risk_decision.stop_loss_price is None:
+            raise ValueError("approved stop-loss is unavailable")
+        if signal.reference_price is None:
+            raise ValueError("signal reference price is unavailable")
+        entry_price = quote.ask if signal.action == "BUY" else quote.bid
+        stop_distance = abs(signal.reference_price - risk_decision.stop_loss_price)
+        stop_loss_price = (
+            entry_price - stop_distance
+            if signal.action == "BUY"
+            else entry_price + stop_distance
+        )
+        quantity = calculate_broker_position_size(
+            account_equity=account.equity,
+            entry_price=entry_price,
+            stop_loss_price=stop_loss_price,
+            risk_fraction=Decimal("0.01"),
+            metadata=metadata,
+        )
+        direction = _direction(signal)
+        take_profit_price = _take_profit_price(
+            entry_price=entry_price,
+            stop_loss_price=stop_loss_price,
+            direction=direction,
+            multiple=self._take_profit_multiple,
+        )
+        return OrderIntent(
+            client_order_id=f"demo-{signal.instrument}-{timestamp.isoformat()}-{signal.action}",
+            instrument=signal.instrument,
+            direction=direction,
+            quantity=quantity,
+            entry_price=entry_price,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            account_equity=account.equity,
+            risk_fraction=Decimal("0.01"),
+            signal_timestamp=signal.timestamp,
+        )
+
+    def _revalidate(self, order: OrderIntent) -> None:
+        account = self._broker.get_account_snapshot()
+        quote = self._broker.get_market_quote(order.instrument)
+        metadata = self._broker.get_instrument_metadata(order.instrument)
+        validate_broker_order_risk(
+            order,
+            account=account,
+            quote=quote,
+            metadata=metadata,
+            max_spread=self._max_spread,
+        )
