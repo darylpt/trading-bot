@@ -1,7 +1,7 @@
 # Phase 1 Specification — Exness MT5 Broker Readiness
 ## Status
 
-**Implemented locally.** Readiness code and tests pass; the controlled Exness demo read-only smoke is recorded as `READY`. Protected order lifecycle, reconciliation, and operator acceptance evidence remain required for later phases.
+**Verified.** Fresh Exness MT5 demo read-only readiness passed for `XAUUSDm`: terminal connected and authorized, equity `9999.14`, spread `0.260`, `256` candles, writable database, and clock drift `0.001s`. Order lifecycle and reconciliation remain governed by Phases 4–5.
 
 ## Problem
 

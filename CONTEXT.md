@@ -106,10 +106,11 @@ Current status:
 
 | Phase | Status | Scope |
 | --- | --- | --- |
-| Phase 0 | Implemented locally / unverified | Secure baseline, explicit modes, credential hygiene, documentation reconciliation, reproducible local simulation, and recorded local evidence in `docs/PHASE-0-BASELINE-MANIFEST.md`. |
-| Phases 1–4 | Complete locally / evidence limited to documented checks | Strategy, risk, sentiment, and local `SimulatedBroker` paper execution. |
-| Phase 5 | Not complete | Broker-connected Exness MT5 demo lifecycle. |
-| Phases 6–7 | Not complete | Operational hardening and controlled forward test. |
+| Phase 0 | Verified | Secure baseline, explicit modes, credential hygiene, documentation reconciliation, reproducible local simulation, fresh bridge/readiness, protected demo lifecycle, and operator acceptance are recorded in `docs/PHASE-0-BASELINE-MANIFEST.md`. |
+| Phases 1–4 | Verified | Phase 1 readiness, Phase 2 market-data continuity, Phase 3 broker-aware risk, and the protected Phase 4 demo lifecycle have recorded evidence. |
+| Phase 5 | Verified | Protected broker-connected lifecycle, deterministic failure injection, controlled restart/recovery, and zero residual positions are recorded. |
+| Phase 6 | Verified | Trading-readiness state, durable controls, sanitized structured-log alerts, optional HTTPS webhook boundary, forward-test window enforcement, and provider-failure recovery are recorded. |
+| Phase 7 | In progress / unverified | Windows time synchronization is now healthy, but the bridge has no fresh XAUUSDm tick after the supervised process exit; restart validation rejected stale quote data, so the phase remains fail-closed pending fresh broker data and incident review. |
 
 The local simulated quote/paper-fill path is not evidence of broker connectivity.
 

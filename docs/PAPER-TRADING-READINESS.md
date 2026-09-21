@@ -10,15 +10,18 @@ Implementation follows the workflow in `docs/SPEC-DRIVEN-DEVELOPMENT.md`: define
 
 ## Current status
 
-The repository currently provides a local simulated quote and paper-fill path. It does not yet prove broker-connected paper trading.
+The repository provides a local simulated quote/paper-fill path and a broker-connected Exness MT5 demo path. The controlled one-order demo lifecycle has now passed once; this is evidence for the Phase 4/5 acceptance scenarios, not multi-day readiness.
 
 Current host probe:
 
 - `terminal64.exe` is running and the updated bridge authenticates with the rotated `.env` credentials.
 - The complete read-only readiness check passed after accounting for sequential bridge-call latency: account equity `10000.0`, `XAUUSDm` session open, spread `0.260`, `32` closed candles, writable database, and clock drift below one second.
-- Broker backfill now preserves known session/maintenance gaps without synthesizing candles; unclassified gaps remain fail-closed.
-- Four controlled `0.01` LONG demo submissions with attached exits did not produce a protected fill. The first two reconciled to no matching broker order/open position; the third and fourth returned `UNKNOWN`, with reconciliation unavailable. The durable local database remains halted and no further blind retry is authorized.
-- The bridge logs the submit request and returns HTTP `503`, but does not yet expose whether `order_check` or `order_send` failed. Protected-exit confirmation, broker-position reconciliation, safe closure, and multi-day forward-test evidence remain unverified.
+- Broker backfill preserves known session/maintenance gaps without synthesizing candles; unclassified gaps remain fail-closed.
+- A non-submitting protected-order preflight returned `ACCEPTED` with `protection_confirmed=true`; the bridge did not call `order_send`.
+- After restarting the bridge with direct native MT5 dispatch for `order_check`/`order_send` and shortening the MT5 comment to the provider's accepted length, one controlled `0.01` LONG `XAUUSDm` demo order returned broker retcode `10009`, confirmed attached SL/TP, reconciled to a broker position, closed safely, and left no matching open position. Durable local state records `FILLED` and `CLOSED`; the sanitized smoke result is recorded in the session output.
+- The prior failed controlled attempt left a local runtime halt; it was explicitly reset after operator review for Phase 1 forward-test preparation. Halt state remains fail-closed and must not be cleared as a smoke-test side effect.
+- The bridge exposes sanitized `order_check`/`order_send` phase diagnostics, a non-submitting preflight endpoint, and timestamped authoritative `ORDER_NOT_FOUND` versus transport `UNKNOWN`. Multi-day forward-test evidence and operator acceptance remain unverified.
+- Latest post-exit probe: bridge health and authentication passed, Windows NTP remained near synchronized, but XAUUSDm quote data was approximately `20,382s` old. Startup rejected the run with `StaleMarketDataError`, persisted a halt, and submitted no order; the daemon exit code and stale-feed incident remain under review.
 
 ## Safety prerequisites
 

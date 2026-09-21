@@ -188,6 +188,39 @@ def test_order_placement_maps_broker_side_stop_and_target() -> None:
     assert '"volume": "100"' in request_body
 
 
+def test_order_preflight_uses_non_submitting_endpoint() -> None:
+    transport = FakeTransport(
+        {
+            "status": "ACCEPTED",
+            "preflight": True,
+            "protectionConfirmed": True,
+        }
+    )
+
+    result = adapter(transport).preflight_order(order_payload())
+
+    assert result.status == "ACCEPTED"
+    assert result.protection_confirmed is True
+    assert transport.calls[0]["url"].endswith("/orders/preflight")
+
+
+def test_order_reconciliation_preserves_authoritative_not_found() -> None:
+    transport = FakeTransport(
+        {
+            "status": "ORDER_NOT_FOUND",
+            "errorMessage": "authoritative broker search found no matching order",
+        }
+    )
+
+    result = adapter(transport).reconcile_order("missing-order")
+
+    assert result is not None
+    assert result.status == "ORDER_NOT_FOUND"
+    assert result.rejection_reason == (
+        "authoritative broker search found no matching order"
+    )
+
+
 def test_transient_timeout_retries_reads_with_exponential_backoff() -> None:
     sleep_calls: list[float] = []
     transport = FakeTransport(

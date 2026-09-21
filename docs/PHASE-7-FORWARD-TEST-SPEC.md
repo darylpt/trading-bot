@@ -1,7 +1,20 @@
 # Phase 7 Specification — Controlled Demo Forward Test
 ## Status
 
-**Staged but blocked.** The production `BROKER_DEMO` entrypoint, readiness gate, durable SQLite metrics, and interval control are available; no multi-day run starts until the lifecycle gate, approved window, alert route, and quantitative thresholds are provided.
+**Running; unverified.** Windows time synchronization is now healthy, but the bridge has no fresh XAUUSDm market tick after the supervised daemon/bridge exit. A post-resync readiness attempt correctly failed closed on stale quote data; no completion claim is made until the market feed resumes and the multi-day evidence, recovery evidence, and final review are recorded.
+
+## Current runtime evidence
+
+- Windows time synchronization remains healthy: `Leap Indicator: 0`, `Source: pool.ntp.org,0x9`, and latest stripchart offset approximately `+0.36s`, within the `5s` tolerance.
+- The restarted bridge passes health/authentication, but the latest XAUUSDm quote is approximately `47,300s` old and the latest candle is approximately `48,977s` old. The broker session endpoint may report open, but the feed has no fresh tick; readiness rejects it with `StaleMarketDataError`.
+- Durable runtime halt is `True` with reason `StaleMarketDataError`; no local/broker position is open and no order was submitted during recovery.
+- The supervised daemon exit code `1073807364` (`0x40010004`) and subsequent stale-feed recovery attempt are recorded as an operational incident. Application tolerance remains `5s`.
+- The earlier clock-drift incident is resolved by host NTP synchronization; it was not addressed by widening application tolerance.
+
+## Current operator disposition
+
+- **NO-GO to resume at the current probe:** host time is corrected, but the broker quote/candle stream is stale. Do not clear the durable halt until fresh quote/candle readiness passes.
+- This is an interim demo-only safety disposition. The final decision still requires fresh broker data, five approved weekdays, incident dispositions, all-position reconciliation, and operator review; it makes no live-trading claim.
 
 ## Problem
 
@@ -36,10 +49,31 @@ A recorded multi-day run includes configuration, runtime, connectivity, data, ex
 ## Exit criteria
 
 The project has a reviewed demo-only operational result. No live-trading readiness is implied.
-## Unresolved decisions
+## Decisions
 
-- Test duration, trading schedule, and approved demo instrument after prior-phase evidence.
-- Quantitative go/no-go thresholds for continuity, latency, slippage, and reconciliation.
+- **Approved:** five weekdays, Monday–Friday, 13:00–16:00 UTC; readiness at 12:45 UTC; close and reconcile by 16:15 UTC.
+- **Approved:** sanitized structured logs are the mandatory alert destination for this run; the HTTPS webhook boundary remains optional and no URL is stored in source control.
+- **Approved:** daily drawdown `0.01`, maximum XAUUSDm spread `0.35`, maximum slippage `2.0` pips, maximum clock drift `5` seconds, and maximum market-data age `300` seconds.
+
+The runtime is active under these decisions. The phase remains unverified until the multi-day evidence package, restart/recovery review, incident dispositions, and final demo-only go/no-go decision are complete.
+
+### Approved forward-test operating defaults
+
+These defaults govern the active paper-only run. They do not enable live trading or change the risk limit.
+
+| Control | Approved value | Halt or review behavior |
+| --- | --- | --- |
+| Runtime | `BROKER_DEMO`, `PAPER_TRADING=true`, `LIVE_TRADING=false` | Reject any contradictory configuration |
+| Instrument | `XAUUSDm` | Reject an unauthorized symbol |
+| Entry window | Weekdays, 13:00–16:00 UTC | No new entries outside the window |
+| Readiness/recovery | 12:45 UTC preflight; reconcile by 16:15 UTC | Do not start or finish with unknown state |
+| Daily drawdown | `1%` of session-start equity | Halt new entries for the trading day |
+| Maximum spread | `0.35` price units | Halt new entries until a fresh quote is within tolerance |
+| Maximum slippage | `2.0` pips | Reject/review the affected execution |
+| Clock/data freshness | `5s` drift; `300s` data age | Halt new entries and require fresh readiness |
+| Alert events | disconnect, stale data, clock drift, auth failure, unknown order, reconciliation mismatch, unprotected position, drawdown halt, database failure, fallback, repeated rejection | Emit a sanitized structured-log alert and block entries until fresh readiness/reconciliation; optional webhook delivery is non-authoritative |
+
+The schedule is deliberately narrower than the full 24/5 market. `13:00–16:00 UTC` is the approved conservative London/New York overlap window for this run; reapproval is required if observed liquidity or broker session behavior changes.
 ## Executable slice contract — P7-S1 controlled forward test
 
 **Precondition:** Phases 1–6 are verified; the demo account, authorized instrument, operator schedule, durable metrics, alert route, and recovery procedure are approved.

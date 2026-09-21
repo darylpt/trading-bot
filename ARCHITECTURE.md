@@ -14,15 +14,24 @@ market data -> strategy signal -> risk approval -> execution gate -> broker adap
 
 - `src/strategy/` validates candles and calculates deterministic indicators.
 - `src/trading_bot/strategy.py` emits typed `BUY`/`SELL`/`HOLD` crossover signals.
-- `src/sentiment/` validates strict JSON sentiment and news blackout state. Sentiment never submits orders.
+- `src/sentiment/` validates strict JSON sentiment and news blackout state.
+- `src/sentiment/runtime.py` applies the bounded, directional sentiment gate; missing,
+  stale, malformed, unavailable, or below-threshold sentiment blocks new entries.
+- `src/sentiment/news.py` loads a typed, fresh JSON news snapshot; the configured
+  source is required for the hybrid entry path.
+- `src/trading_bot/__main__.py` constructs the sentiment gate and passes it through
+  every production tick before risk approval; sentiment never submits orders.
+- `src/trading_bot/engine.py` remains the typed integration pipeline used by
+  deterministic end-to-end tests; the daemon's authoritative path is `run_tick()`
+  with the same sentiment contract, risk boundary, and execution engines.
 - `src/trading_bot/risk.py` is the Phase 3 pre-trade risk boundary.
 - `src/trading_bot/execution.py` is the local simulation boundary: it fills approved simulated orders, persists positions, evaluates protective and counter-signal exits, and records realized P&L.
 - `src/trading_bot/broker/` owns `SimulatedBroker` for local paper testing and `ExnessMT5Broker` for the explicit demo/live boundary.
 - `src/execution/` contains the standard `BaseBroker` abstraction, broker-neutral payloads, reconciliation, and the rejecting execution gate.
 - `src/persistence/` owns SQLite schema creation, operational writes, session metrics, and the cross-shell CLI.
 - `src/observability/` owns sanitized lifecycle logging and forward-test readiness checks.
-- `src/trading_bot/__main__.py` orchestrates startup, one tick, and daemon scheduling; it does not bypass strategy, risk, or execution boundaries.
-
+- `src/trading_bot/__main__.py` orchestrates startup, one tick, and daemon scheduling
+  without bypassing strategy, sentiment, risk, or execution boundaries.
 The normal runtime is not considered broker-connected paper trading until it proves demo authentication, account and instrument validation, broker order submission, protective-exit confirmation, idempotency, reconciliation, restart recovery, and the forward-test gates in `docs/PAPER-TRADING-READINESS.md`.
 
 ## Environment Variables

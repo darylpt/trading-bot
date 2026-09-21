@@ -94,3 +94,44 @@ def test_demo_transport_error_is_unknown_and_halts_sqlite(tmp_path: Path) -> Non
     assert halted is True
     assert "UNKNOWN" in reason
     repository.close()
+
+
+def test_order_not_found_reconciliation_persists_halt_for_operator_review(
+    tmp_path: Path,
+) -> None:
+    class Gateway:
+        def submit_order(self, payload: BrokerOrderPayload) -> ExecutionResult:
+            raise BrokerConnectionError("bridge unavailable")
+
+        def reconcile_order(self, client_order_id: str) -> ExecutionResult:
+            return ExecutionResult(
+                client_order_id=client_order_id,
+                status="ORDER_NOT_FOUND",
+                rejection_reason="authoritative broker search found no matching order",
+                environment="DEMO",
+            )
+
+    order = OrderIntent(
+        client_order_id="demo-not-found-1",
+        instrument="XAUUSDm",
+        direction="LONG",
+        quantity=Decimal("0.01"),
+        entry_price=Decimal("2000"),
+        stop_loss_price=Decimal("1990"),
+        take_profit_price=Decimal("2020"),
+        account_equity=Decimal("10000"),
+        risk_fraction=Decimal("0.01"),
+        signal_timestamp=datetime.now(timezone.utc),
+    )
+    repository = SQLiteRepository(tmp_path / "session_metrics.db")
+    gate = ExecutionGate(Gateway(), environment="DEMO", repository=repository)
+
+    assert gate.submit(order).status == "UNKNOWN"
+    result = gate.submit(order)
+
+    assert result.status == "ORDER_NOT_FOUND"
+    assert repository.get_trade(order.client_order_id).status == "ORDER_NOT_FOUND"
+    halted, reason = repository.get_trading_halt()
+    assert halted is True
+    assert "operator review" in reason
+    repository.close()

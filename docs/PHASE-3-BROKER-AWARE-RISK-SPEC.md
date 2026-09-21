@@ -1,7 +1,7 @@
 # Phase 3 Specification — Broker-Aware Risk
 ## Status
 
-**Implemented locally.** Broker-aware sizing and pre-submit revalidation code exist; broker contract evidence remains required for verification.
+**Verified.** Broker-aware sizing and pre-submit revalidation code exist; deterministic risk tests, live broker metadata retrieval, a metadata-based one-percent risk smoke, and the protected demo lifecycle pass. Current stale quotes remain rejected before risk approval and do not invalidate the verified fail-closed contract.
 
 ## Problem
 
@@ -29,17 +29,19 @@ No broker order submission, live trading, strategy changes, or risk-limit increa
 
 Requires verified Phase 1 account/instrument readiness and Phase 2 quote continuity. Produces a typed approved order intent or a recorded rejection for the single execution gate.
 
-## Acceptance evidence
+Acceptance evidence is recorded:
 
-Deterministic tests cover long/short sizing, precision and min/max quantity, stop/freeze levels, spread/slippage/margin effects, drawdown, duplicate exposure, stale inputs, and one-percent boundary behavior.
+- Complete risk and execution-gate acceptance tests: `29 passed`, covering LONG/SHORT exits, quantity steps and bounds, stop/freeze constraints, spread and margin effects, drawdown, duplicate exposure, stale inputs, one-percent boundaries, revalidation, and no bypass submission.
+- Live Exness metadata read: contract size `100.0`, tick size `0.001`, tick value `0.1`, quantity step `0.01`, minimum `0.01`, maximum `200.0`, precision `3`, and account equity `9999.14`.
+- Metadata risk smoke: quantity `0.11`, stop risk `99.0000`, and risk fraction `0.009901`, below the one-percent ceiling; the previously recorded protected demo lifecycle confirmed broker-side SL/TP and reconciliation.
 
 ## Exit criteria
 
 Broker-aware risk approval is verified and rejects unsafe or unverifiable order intents without bypass paths.
-## Unresolved decisions
+## Resolved decisions
 
-- Exact Exness instrument metadata mapping and conversion rules.
-- Whether the account permits netting or hedging, subject to broker evidence.
+- **Resolved:** Exness instrument metadata uses the broker-provided contract/tick/quantity fields and `tick_value / tick_size` conversion shown in the recorded metadata read.
+- **Resolved:** this demo path uses one-position-per-instrument netting semantics; externally changed positions remain `EXTERNAL_REVIEW`/`HALTED`.
 ## Executable slice contract — P3-S1 broker-aware risk approval
 
 **Precondition:** Phases 1 and 2 are verified and provide fresh account, instrument, quote, and continuity data.

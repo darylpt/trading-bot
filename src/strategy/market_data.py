@@ -58,7 +58,11 @@ def validate_candles(
         raise MarketDataError("insufficient candle history")
     if not candles:
         return ()
-    expected = timedelta(minutes=15 if candles[0].timeframe == "15m" else 60)
+    timeframe_minutes = {"1m": 1, "5m": 5, "15m": 15, "1h": 60}
+    try:
+        expected = timedelta(minutes=timeframe_minutes[candles[0].timeframe])
+    except KeyError as exc:
+        raise MarketDataError("unsupported timeframe") from exc
     for previous, current in zip(candles, candles[1:]):
         if (
             current.instrument != candles[0].instrument
@@ -76,12 +80,12 @@ def load_csv_candles(
     path: str | Path,
     *,
     instrument: str = "EUR_USD",
-    timeframe: Literal["15m", "1h"] = "15m",
+    timeframe: Literal["1m", "5m", "15m", "1h"] = "15m",
     minimum_history: int = 1,
     allow_gaps: bool = False,
 ) -> tuple[MarketCandle, ...]:
     """Load typed OHLC records from a CSV with timestamp/OHLC headers."""
-    if timeframe not in {"15m", "1h"}:
+    if timeframe not in {"1m", "5m", "15m", "1h"}:
         raise MarketDataError("unsupported timeframe")
     rows: list[MarketCandle] = []
     try:

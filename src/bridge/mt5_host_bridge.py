@@ -44,10 +44,11 @@ import socket
 import ssl
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, TypeVar
 from urllib.parse import unquote, urlparse
 
 import uvicorn
@@ -69,9 +70,47 @@ _EXPECTED_SERVER = "Exness-MT5Trial17"
 _LISTEN_HOST = "0.0.0.0"
 _DEFAULT_PORT = 18812
 
+_T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class _MT5CallFailure:
+    """Sanitized failure details for one serialized MT5 call."""
+
+    phase: str
+    exception_type: str | None
+    last_error_code: int | str | None
+    last_error_comment: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "phase": self.phase,
+            "exception_type": self.exception_type,
+            "last_error_code": self.last_error_code,
+            "last_error_comment": self.last_error_comment,
+        }
+
+    def __str__(self) -> str:
+        return (
+            f"phase={self.phase} exception={self.exception_type or 'none'} "
+            f"last_error_code={self.last_error_code!s} "
+            f"last_error_comment={self.last_error_comment}"
+        )
+
 
 class MT5OperationError(RuntimeError):
     """An MT5 provider failure that makes the transaction state unknown."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase: str = "unknown",
+        diagnostics: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.phase = phase
+        self.diagnostics = diagnostics or {"phase": phase}
 
 
 # MT5 operation serialization – bindings are not thread-safe.
@@ -130,8 +169,11 @@ def _supported_symbol(symbol: str) -> str:
     value = symbol.strip()
     if not value:
         raise ValueError("symbol must not be empty")
-    if value.upper() in {"XAUUSD.M", "XAUUSDM"}:
+    normalized = value.upper().replace("_", "")
+    if normalized in {"XAUUSD.M", "XAUUSDM"}:
         return "XAUUSDm"
+    if normalized in {"EURUSD", "EURUSDM"}:
+        return "EURUSDm"
     return value.upper()
 
 
@@ -190,30 +232,37 @@ def _mt5_init(
 
 
 def _mt5_ready() -> tuple[bool, str]:
-    """Check whether the MT5 terminal is initialized and connected."""
+    """Check the existing MT5 session without resetting credentials."""
     if _mt5 is None:
         return False, "MetaTrader5 module not loaded"
-    if not _mt5.initialize():
-        return False, "MT5 terminal not initialized"
-    ai = _mt5.account_info()
-    if ai is None:
+    try:
+        terminal = _mt5.terminal_info()
+        account = _mt5.account_info()
+    except Exception as exc:  # noqa: BLE001
+        return False, type(exc).__name__
+    if terminal is None:
+        return False, "MT5 terminal info unavailable"
+    if not bool(getattr(terminal, "connected", False)):
+        return False, "MT5 terminal is disconnected"
+    if account is None:
         return False, "MT5 account info unavailable"
     return True, ""
 
 
 def _mt5_ensure_init() -> None:
-    """Re-initialize the MT5 connection if the terminal lost connectivity."""
+    """Re-initialize the MT5 connection only when the existing session is unavailable."""
     if _mt5 is None:
         raise RuntimeError("MetaTrader5 module not loaded")
-    if _mt5.initialize():
+    ready, reason = _mt5_ready()
+    if ready:
         return
-    # Attempt re-init with environment credentials.
     login = int(os.environ["EXNESS_LOGIN"])
-    _mt5.initialize(
+    if not _mt5.initialize(
         login=login,
         password=os.environ["EXNESS_PASSWORD"],
         server=os.environ["EXNESS_SERVER"],
-    )
+    ):
+        raise RuntimeError(f"MT5 terminal unavailable: {reason}")
 
 
 def _validate_mt5_identity() -> None:
@@ -232,35 +281,73 @@ def _validate_mt5_identity() -> None:
         raise RuntimeError("MT5 server identity mismatch")
 
 
-def _safe_call(fn, label: str, *args, **kwargs):
-    """Execute an MT5 function under the lock with error handling."""
+def _sanitize_provider_text(value: object) -> str:
+    """Keep provider diagnostics bounded and free of credential-like text."""
+    text = " ".join(str(value).split())
+    lowered = text.lower()
+    if any(
+        marker in lowered
+        for marker in ("authorization", "bearer ", "password", "api_key", "token=")
+    ):
+        return "[redacted]"
+    return text[:160] if text else ""
+
+
+def _last_mt5_error_parts() -> tuple[int | str | None, str]:
+    """Return only the MT5 numeric error and sanitized provider comment."""
+    if _mt5 is None:
+        return None, "MT5 module not loaded"
+    try:
+        err = _mt5.last_error()
+        if isinstance(err, tuple) and len(err) >= 2:
+            code = err[0] if isinstance(err[0], (int, str)) else None
+            return code, _sanitize_provider_text(err[1])
+        return None, _sanitize_provider_text(err or "unknown MT5 error")
+    except Exception:  # noqa: BLE001
+        return None, "MT5 error unavailable"
+
+
+def _safe_call(
+    fn: Callable[..., _T], label: str, *args: object, **kwargs: object
+) -> tuple[_T | None, _MT5CallFailure | None]:
+    """Execute an MT5 function and retain sanitized phase diagnostics."""
     with _MT5_LOCK:
         start = time.monotonic()
         try:
             _mt5_ensure_init()
             _validate_mt5_identity()
-            result = fn(*args, **kwargs)
+            if label == "order_check":
+                result = _mt5.order_check(args[0])
+            elif label == "order_send":
+                result = _mt5.order_send(args[0])
+            else:
+                result = fn(*args, **kwargs)
             elapsed_ms = round((time.monotonic() - start) * 1000)
-            LOGGER.debug("MT5 %s completed in %dms", label, elapsed_ms)
+            LOGGER.debug("MT5 phase=%s completed in %dms", label, elapsed_ms)
             return result, None
         except Exception as exc:  # noqa: BLE001
-            return None, str(exc)
+            code, comment = _last_mt5_error_parts()
+            failure = _MT5CallFailure(
+                phase=label,
+                exception_type=type(exc).__name__,
+                last_error_code=code,
+                last_error_comment=comment,
+            )
+            LOGGER.warning(
+                "MT5 phase=%s failed exception=%s last_error_code=%s "
+                "last_error_comment=%s",
+                label,
+                failure.exception_type,
+                failure.last_error_code,
+                failure.last_error_comment,
+            )
+            return None, failure
 
 
 def _last_mt5_error() -> str:
     """Return a sanitized description of the last MT5 error."""
-    if _mt5 is None:
-        return "MT5 module not loaded"
-    try:
-        err = _mt5.last_error()
-        if err is None:
-            return "unknown MT5 error"
-        # err is typically a tuple: (code, message)
-        if isinstance(err, tuple) and len(err) >= 2:
-            return f"retcode={err[0]} comment={err[1]}"
-        return str(err)
-    except Exception:  # noqa: BLE001
-        return "MT5 error unavailable"
+    code, comment = _last_mt5_error_parts()
+    return f"retcode={code!s} comment={comment}"
 
 
 def _ensure_symbol_selected(symbol: str) -> None:
@@ -406,6 +493,8 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             if account_id != _EXPECTED_ACCOUNT:
                 return _err_json(self, 403, "account identity mismatch")
             rest = "/".join(parts[4:])
+            if rest == "orders/preflight":
+                return self._handle_rest_preflight_order(account_id, body)
             if rest == "orders":
                 return self._handle_rest_submit_order(account_id, body)
             if rest.startswith("positions/"):
@@ -415,7 +504,6 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                     return self._handle_rest_close_position(
                         account_id, inner_parts[0], body
                     )
-
         _err_json(self, 404, "not found")
 
     def do_DELETE(self) -> None:
@@ -771,9 +859,14 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             return _err_json(self, 400, f"invalid JSON: {exc}")
         if not isinstance(req, dict):
             return _err_json(self, 400, "request must be a JSON object")
-
         try:
             result = _process_order(req)
+        except MT5OperationError as exc:
+            return _err_json(
+                self,
+                503,
+                f"MT5 {exc.phase} failed; transaction state is unknown",
+            )
         except ValueError as exc:
             return _err_json(self, 400, str(exc))
 
@@ -785,6 +878,20 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body_bytes)
+
+    def _handle_rest_preflight_order(self, account_id: str, body: bytes) -> None:
+        """POST /api/accounts/{id}/orders/preflight without order submission."""
+        try:
+            req = json.loads(body)
+        except (json.JSONDecodeError, ValueError) as exc:
+            return _err_json(self, 400, f"invalid JSON: {exc}")
+        if not isinstance(req, dict):
+            return _err_json(self, 400, "request must be a JSON object")
+        try:
+            result = _process_order(req, submit=False)
+        except ValueError as exc:
+            return _err_json(self, 400, str(exc))
+        _ok_json(self, result)
 
     def _handle_rest_cancel_order(self, account_id: str, client_id: str) -> None:
         """DELETE /api/accounts/{id}/orders/{client_order_id}
@@ -798,7 +905,7 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         if err:
             return _err_json(self, 503, f"cancel lookup failed: {err}")
 
-        orders = (
+        orders: list[object] = (
             [
                 candidate
                 for candidate in result
@@ -811,7 +918,7 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             order = orders[0]
             request = {
                 "action": _mt5.TRADE_ACTION_REMOVE,
-                "order": int(order.ticket),
+                "order": int(getattr(order, "ticket", 0)),
             }
             check_result, check_err = _safe_call(
                 _mt5.order_check, "order_check", request
@@ -864,16 +971,17 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         _ok_json(self, result)
 
     def _handle_rest_order_status(self, account_id: str, client_id: str) -> None:
-        """GET /api/accounts/{id}/orders/{client_order_id}
-        Response matches ``reconcile_order`` in BaseBroker.
-        """
+        """GET /api/accounts/{id}/orders/{client_order_id}."""
         if not client_id:
             return _err_json(self, 400, "client_order_id is required")
-
-        result = _get_order_status(client_id)
-        if result.get("error"):
-            return _err_json(self, 404, str(result["error"]))
-
+        try:
+            result = _get_order_status(client_id)
+        except MT5OperationError as exc:
+            return _err_json(
+                self,
+                503,
+                f"MT5 {exc.phase} failed; reconciliation is unknown",
+            )
         _ok_json(self, result)
 
     # ── JSON-RPC 2.0 ─────────────────────────────────────────────────────
@@ -966,6 +1074,7 @@ def _dispatch_rpc(req: object) -> object | None:
         "instrument.session": _rpc_instrument_session,
         "candles.get": _rpc_candles_get,
         "order.submit": _rpc_order_submit,
+        "order.preflight": _rpc_order_preflight,
         "order.status": _rpc_order_status,
         "account.info": _rpc_account_info,
         "position.close": _rpc_position_close,
@@ -986,15 +1095,24 @@ def _dispatch_rpc(req: object) -> object | None:
     try:
         result = handler(params)
         return {"jsonrpc": "2.0", "id": req_id, "result": result}
-    except MT5OperationError:
-        LOGGER.error("RPC %s failed; transaction state is unknown", method)
+    except MT5OperationError as exc:
+        LOGGER.error(
+            "RPC %s failed phase=%s; transaction state is unknown",
+            method,
+            exc.phase,
+        )
         return {
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {
                 "code": -32001,
                 "message": "MT5 operation failed; transaction state is unknown",
-                "data": {"status": "UNKNOWN", "halt_new_entries": True},
+                "data": {
+                    "status": "UNKNOWN",
+                    "halt_new_entries": True,
+                    "phase": exc.phase,
+                    "diagnostics": exc.diagnostics,
+                },
             },
         }
     except ValueError as exc:
@@ -1243,35 +1361,21 @@ def _rpc_candles_get(params: dict[str, object]) -> dict[str, object]:
 
 
 def _rpc_order_submit(params: dict[str, object]) -> dict[str, object]:
-    """order.submit – submit a demo order with mandatory SL/TP.
-
-    Params: {
-        "symbol": "XAUUSDm",
-        "volume": "0.01",
-        "type": "ORDER_TYPE_BUY",
-        "price": "2650.50",
-        "sl": "2645.00",
-        "tp": "2660.00",
-        "comment": "client-order-id",
-        "environment": "DEMO"
-    }
-    """
+    """order.submit – submit a demo order with mandatory SL/TP."""
     return _process_order(params)
 
 
-def _rpc_order_status(params: dict[str, object]) -> dict[str, object]:
-    """order.status – reconcile an order by client_order_id.
+def _rpc_order_preflight(params: dict[str, object]) -> dict[str, object]:
+    """order.preflight – run MT5 order_check without submitting."""
+    return _process_order(params, submit=False)
 
-    Params: {"client_order_id": "..."}
-    """
+
+def _rpc_order_status(params: dict[str, object]) -> dict[str, object]:
+    """order.status – reconcile an order by client_order_id."""
     client_id_raw = params.get("client_order_id")
     if not client_id_raw or not isinstance(client_id_raw, str):
         raise ValueError("client_order_id is required")
-
-    result = _get_order_status(client_id_raw)
-    if result.get("error"):
-        raise ValueError(result["error"])
-    return result
+    return _get_order_status(client_id_raw)
 
 
 def _rpc_account_info(params: dict[str, object]) -> dict[str, object]:
@@ -1330,16 +1434,8 @@ def _rpc_symbol_info_tick(params: dict[str, object]) -> dict[str, object]:
 
 
 def _rpc_order_send(params: dict[str, object]) -> dict[str, object]:
-    """Submit an order while distinguishing validation from MT5 failure."""
-    try:
-        return _rpc_order_submit(params)
-    except ValueError as exc:
-        message = str(exc).lower()
-        if any(
-            marker in message for marker in ("unavailable", "failed", "returned none")
-        ):
-            raise MT5OperationError("order_send operation failed") from exc
-        raise
+    """Submit an order; provider ambiguity is raised by the order processor."""
+    return _rpc_order_submit(params)
 
 
 def _rpc_positions_get(params: dict[str, object]) -> dict[str, object]:
@@ -1368,18 +1464,78 @@ def _rpc_order_close(params: dict[str, object]) -> dict[str, object]:
 # ── shared order logic ───────────────────────────────────────────────────────
 
 
-def _process_order(req: dict[str, object]) -> dict[str, object]:
-    """Process a deal order (used by both REST and RPC).
+def _order_facts(
+    *,
+    symbol: str,
+    volume: float,
+    price: float,
+    sl: float,
+    tp: float,
+    filling_mode: int,
+    symbol_info: object,
+) -> dict[str, object]:
+    """Return safe request and constraint facts for diagnostics."""
+    return {
+        "symbol": symbol,
+        "volume": volume,
+        "price": price,
+        "sl": sl,
+        "tp": tp,
+        "filling_mode": filling_mode,
+        "volume_min": float(getattr(symbol_info, "volume_min", 0.0)),
+        "volume_max": float(getattr(symbol_info, "volume_max", 0.0)),
+        "volume_step": float(getattr(symbol_info, "volume_step", 0.0)),
+        "stops_level": int(getattr(symbol_info, "trade_stops_level", 0)),
+        "freeze_level": int(getattr(symbol_info, "trade_freeze_level", 0)),
+    }
 
-    Expected request fields:
-        symbol, volume, type, price, sl, tp, comment (client_order_id),
-        environment
 
-    Returns a dict matching what BaseBroker.submit_order expects:
-        { orderCreateTransaction/order/orderId/id, status,
-          filledQuantity/filled_volume, fillPrice/averagePrice,
-          stopLoss/sl, takeProfit/tp, protectionConfirmed/protected }
-    """
+def _provider_request_facts(request: object) -> dict[str, object]:
+    """Extract safe fields from the provider's normalized request object."""
+    return {
+        name: getattr(request, name)
+        for name in (
+            "action",
+            "symbol",
+            "volume",
+            "price",
+            "sl",
+            "tp",
+            "deviation",
+            "type",
+            "type_filling",
+            "type_time",
+        )
+        if hasattr(request, name)
+    }
+
+
+def _rejected_order_response(
+    *,
+    retcode: int | str,
+    comment: str,
+    phase: str,
+    diagnostics: dict[str, object],
+) -> dict[str, object]:
+    """Return a typed deterministic rejection without an order identifier."""
+    safe_comment = _sanitize_provider_text(comment)
+    return {
+        "orderCreateTransaction": {"id": "0"},
+        "order": {"id": "0"},
+        "orderId": "0",
+        "status": "REJECTED",
+        "phase": phase,
+        "retcode": retcode,
+        "comment": safe_comment,
+        "errorMessage": f"{phase} rejected: retcode={retcode} comment={safe_comment}",
+        "diagnostics": diagnostics,
+        "protectionConfirmed": False,
+        "protected": False,
+    }
+
+
+def _process_order(req: dict[str, object], *, submit: bool = True) -> dict[str, object]:
+    """Validate, preflight, and optionally submit one protected deal order."""
     symbol_raw = req.get("symbol")
     volume_raw = req.get("volume")
     order_type_raw = req.get("type")
@@ -1413,18 +1569,15 @@ def _process_order(req: dict[str, object]) -> dict[str, object]:
     price = _finite_pos("price", price_raw)
     sl = _finite_pos("sl", sl_raw)
     tp = _finite_pos("tp", tp_raw)
-
     price_f = float(price)
     sl_f = float(sl)
     tp_f = float(tp)
     if mt5_type == _mt5.ORDER_TYPE_BUY:
         if not (sl_f < price_f < tp_f):
             raise ValueError("BUY exits must satisfy sl < price < tp")
-    else:
-        if not (tp_f < price_f < sl_f):
-            raise ValueError("SELL exits must satisfy tp < price < sl")
+    elif not (tp_f < price_f < sl_f):
+        raise ValueError("SELL exits must satisfy tp < price < sl")
 
-    # Validate lot size against symbol constraints.
     result_si, err_si = _safe_call(_mt5.symbol_info, "symbol_info", symbol)
     if err_si or result_si is None:
         raise ValueError(f"symbol info unavailable: {err_si or _last_mt5_error()}")
@@ -1442,18 +1595,26 @@ def _process_order(req: dict[str, object]) -> dict[str, object]:
         if abs(steps - round(steps)) > 1e-9:
             raise ValueError(f"volume {volume_f} not aligned to step {vol_step}")
 
-    # Get current market price to validate order price.
     result_tick, err_tick = _safe_call(
         _mt5.symbol_info_tick, "symbol_info_tick", symbol
     )
     if err_tick or result_tick is None:
         raise ValueError(f"market data unavailable: {err_tick or _last_mt5_error()}")
 
-    # Build MT5 order request.
+    filling_mode = _preferred_filling_mode(si)
+    facts = _order_facts(
+        symbol=symbol,
+        volume=volume_f,
+        price=price_f,
+        sl=sl_f,
+        tp=tp_f,
+        filling_mode=filling_mode,
+        symbol_info=si,
+    )
     request: dict[str, object] = {
         "action": _mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
-        "volume": float(volume),
+        "volume": volume_f,
         "type": mt5_type,
         "price": price_f,
         "sl": sl_f,
@@ -1462,50 +1623,112 @@ def _process_order(req: dict[str, object]) -> dict[str, object]:
         "magic": 234000,
         "comment": client_id,
         "type_time": _mt5.ORDER_TIME_GTC,
-        "type_filling": _preferred_filling_mode(si),
+        "type_filling": filling_mode,
     }
 
     LOGGER.info(
-        "order_submit symbol=%s type=%s vol=%s sl=%s tp=%s comment=%s",
+        "order_submit phase=prepare symbol=%s type=%s vol=%s sl=%s tp=%s",
         symbol,
         otype,
         volume,
         sl,
         tp,
-        client_id,
     )
+    LOGGER.info("order_phase phase=order_check facts=%s", facts)
 
-    # Pre-check.
     result_check, err_check = _safe_call(_mt5.order_check, "order_check", request)
     if err_check:
-        raise ValueError(f"order check failed: {err_check}")
-    check = result_check
-    if check is not None:
-        check_retcode = int(getattr(check, "retcode", 0))
-        if check_retcode not in (0, _mt5.TRADE_RETCODE_DONE):
-            check_comment = str(getattr(check, "comment", ""))
-            raise ValueError(
-                f"order pre-check failed: retcode={check_retcode} comment={check_comment}"
-            )
-
-    # Submit.
+        return _rejected_order_response(
+            retcode=err_check.last_error_code or "CALL_FAILED",
+            comment=err_check.last_error_comment,
+            phase="order_check",
+            diagnostics={"request": facts, "failure": err_check.as_dict()},
+        )
+    if result_check is None:
+        code, comment = _last_mt5_error_parts()
+        return _rejected_order_response(
+            retcode=code or "NO_RESULT",
+            comment=comment,
+            phase="order_check",
+            diagnostics={
+                "request": facts,
+                "failure": {
+                    "phase": "order_check",
+                    "exception_type": None,
+                    "last_error_code": code,
+                    "last_error_comment": comment,
+                },
+            },
+        )
+    check_retcode = int(getattr(result_check, "retcode", 0))
+    check_comment = _sanitize_provider_text(getattr(result_check, "comment", ""))
+    provider_facts = _provider_request_facts(getattr(result_check, "request", None))
+    LOGGER.info(
+        "order_phase phase=order_check_result retcode=%s comment=%s "
+        "facts=%s provider_facts=%s",
+        check_retcode,
+        check_comment,
+        facts,
+        provider_facts,
+    )
+    if check_retcode not in (0, _mt5.TRADE_RETCODE_DONE):
+        return _rejected_order_response(
+            retcode=check_retcode,
+            comment=check_comment,
+            phase="order_check",
+            diagnostics={"request": facts, "provider_request": provider_facts},
+        )
+    if not submit:
+        return {
+            "orderCreateTransaction": {"id": "0"},
+            "order": {"id": "0"},
+            "orderId": "0",
+            "status": "ACCEPTED",
+            "phase": "order_check",
+            "retcode": check_retcode,
+            "comment": check_comment,
+            "preflight": True,
+            "protectionConfirmed": True,
+            "protected": True,
+            "diagnostics": {
+                "request": facts,
+                "provider_request": provider_facts,
+            },
+        }
+    LOGGER.info("order_phase phase=order_send facts=%s", facts)
     result_send, err_send = _safe_call(_mt5.order_send, "order_send", request)
     if err_send:
-        raise ValueError(f"order send failed: {err_send}")
+        raise MT5OperationError(
+            "MT5 order_send failed; transaction state is unknown",
+            phase="order_send",
+            diagnostics={"request": facts, "failure": err_send.as_dict()},
+        )
+    if result_send is None:
+        code, comment = _last_mt5_error_parts()
+        raise MT5OperationError(
+            "MT5 order_send returned no result; transaction state is unknown",
+            phase="order_send",
+            diagnostics={
+                "request": facts,
+                "failure": {
+                    "phase": "order_send",
+                    "exception_type": None,
+                    "last_error_code": code,
+                    "last_error_comment": comment,
+                },
+            },
+        )
 
     deal = result_send
-    if deal is None:
-        raise ValueError("order_send returned None")
-
     retcode = int(getattr(deal, "retcode", 0))
     order_ticket = getattr(deal, "order", 0)
     deal_ticket = getattr(deal, "deal", 0)
     filled_volume = getattr(deal, "volume", 0.0)
     deal_price = getattr(deal, "price", 0.0)
-    deal_comment = str(getattr(deal, "comment", ""))
-
+    deal_comment = _sanitize_provider_text(getattr(deal, "comment", ""))
     LOGGER.info(
-        "order_result retcode=%s order=%s deal=%s vol=%s price=%s comment=%s",
+        "order_result phase=order_send retcode=%s order=%s deal=%s vol=%s "
+        "price=%s comment=%s",
         retcode,
         order_ticket,
         deal_ticket,
@@ -1515,109 +1738,135 @@ def _process_order(req: dict[str, object]) -> dict[str, object]:
     )
 
     if retcode == _mt5.TRADE_RETCODE_DONE:
-        # Determine protection confirmation: SL and TP were sent in the request,
-        # and the fill succeeded, so protection is confirmed.
         protection_confirmed = sl_raw is not None and tp_raw is not None
         return {
             "orderCreateTransaction": {"id": str(deal_ticket)},
             "order": {"id": str(deal_ticket)},
             "orderId": str(deal_ticket),
             "status": "FILLED",
+            "phase": "order_send",
             "retcode": retcode,
             "comment": deal_comment,
             "filledQuantity": str(float(filled_volume)),
             "filled_volume": str(float(filled_volume)),
             "fillPrice": str(float(deal_price)),
             "averagePrice": str(float(deal_price)),
-            "stopLoss": str(float(sl_f)),
-            "sl": str(float(sl_f)),
-            "takeProfit": str(float(tp_f)),
-            "tp": str(float(tp_f)),
+            "stopLoss": str(sl_f),
+            "sl": str(sl_f),
+            "takeProfit": str(tp_f),
+            "tp": str(tp_f),
             "protectionConfirmed": protection_confirmed,
             "protected": protection_confirmed,
         }
-
-    # Other failure – return REJECTED with the comment (no secrets).
-    return {
-        "orderCreateTransaction": {"id": "0"},
-        "order": {"id": "0"},
-        "orderId": "0",
-        "status": "REJECTED",
-        "retcode": retcode,
-        "comment": deal_comment,
-        "errorMessage": f"MT5 retcode={retcode} comment={deal_comment}",
-        "protectionConfirmed": False,
-        "protected": False,
-    }
+    return _rejected_order_response(
+        retcode=retcode,
+        comment=deal_comment,
+        phase="order_send",
+        diagnostics={"request": facts},
+    )
 
 
 def _get_order_status(client_id: str) -> dict[str, object]:
-    """Look up a broker order/deal by its MT5 comment."""
+    """Reconcile an order using complete authoritative MT5 snapshots."""
     result_h, err_h = _safe_call(
         _mt5.history_deals_get,
         "history_deals_get",
         datetime(1970, 1, 1, tzinfo=timezone.utc),
         datetime.now(timezone.utc),
     )
-    if not err_h and result_h:
-        for deal in result_h:
-            if str(getattr(deal, "comment", "")) != client_id:
-                continue
-            sl = float(getattr(deal, "sl", 0))
-            tp = float(getattr(deal, "tp", 0))
-            return {
-                "order": {"id": str(getattr(deal, "ticket", ""))},
-                "orderId": str(getattr(deal, "ticket", "")),
-                "status": "FILLED",
-                "filledQuantity": str(float(getattr(deal, "volume", 0))),
-                "filled_volume": str(float(getattr(deal, "volume", 0))),
-                "fillPrice": str(float(getattr(deal, "price", 0))),
-                "averagePrice": str(float(getattr(deal, "price", 0))),
-                "stopLoss": str(sl),
-                "sl": str(sl),
-                "takeProfit": str(tp),
-                "tp": str(tp),
-                "protectionConfirmed": sl > 0 and tp > 0,
-                "protected": sl > 0 and tp > 0,
-            }
+    if err_h or result_h is None:
+        failure = err_h or _MT5CallFailure(
+            "history_deals_get", None, *_last_mt5_error_parts()
+        )
+        raise MT5OperationError(
+            "MT5 order history is unavailable",
+            phase="history_deals_get",
+            diagnostics={"failure": failure.as_dict()},
+        )
+    LOGGER.info("order_phase phase=history_deals_get completed")
+    for deal in result_h:
+        if str(getattr(deal, "comment", "")) != client_id:
+            continue
+        sl = float(getattr(deal, "sl", 0))
+        tp = float(getattr(deal, "tp", 0))
+        return {
+            "order": {"id": str(getattr(deal, "ticket", ""))},
+            "orderId": str(getattr(deal, "ticket", "")),
+            "status": "FILLED",
+            "filledQuantity": str(float(getattr(deal, "volume", 0))),
+            "filled_volume": str(float(getattr(deal, "volume", 0))),
+            "fillPrice": str(float(getattr(deal, "price", 0))),
+            "averagePrice": str(float(getattr(deal, "price", 0))),
+            "stopLoss": str(sl),
+            "sl": str(sl),
+            "takeProfit": str(tp),
+            "tp": str(tp),
+            "protectionConfirmed": sl > 0 and tp > 0,
+            "protected": sl > 0 and tp > 0,
+        }
 
     result_p, err_p = _safe_call(_mt5.positions_get, "positions_get")
-    if not err_p and result_p:
-        for pos in result_p:
-            if str(getattr(pos, "comment", "")) != client_id:
-                continue
-            sl = float(getattr(pos, "sl", 0))
-            tp = float(getattr(pos, "tp", 0))
-            return {
-                "order": {"id": str(getattr(pos, "ticket", ""))},
-                "orderId": str(getattr(pos, "ticket", "")),
-                "status": "FILLED",
-                "filledQuantity": str(float(getattr(pos, "volume", 0))),
-                "filled_volume": str(float(getattr(pos, "volume", 0))),
-                "fillPrice": str(float(getattr(pos, "price_open", 0))),
-                "averagePrice": str(float(getattr(pos, "price_open", 0))),
-                "stopLoss": str(sl),
-                "sl": str(sl),
-                "takeProfit": str(tp),
-                "tp": str(tp),
-                "protectionConfirmed": sl > 0 and tp > 0,
-                "protected": sl > 0 and tp > 0,
-            }
+    if err_p or result_p is None:
+        failure = err_p or _MT5CallFailure(
+            "positions_get", None, *_last_mt5_error_parts()
+        )
+        raise MT5OperationError(
+            "MT5 positions snapshot is unavailable",
+            phase="positions_get",
+            diagnostics={"failure": failure.as_dict()},
+        )
+    LOGGER.info("order_phase phase=positions_get completed")
+    for pos in result_p:
+        if str(getattr(pos, "comment", "")) != client_id:
+            continue
+        sl = float(getattr(pos, "sl", 0))
+        tp = float(getattr(pos, "tp", 0))
+        return {
+            "order": {"id": str(getattr(pos, "ticket", ""))},
+            "orderId": str(getattr(pos, "ticket", "")),
+            "status": "FILLED",
+            "filledQuantity": str(float(getattr(pos, "volume", 0))),
+            "filled_volume": str(float(getattr(pos, "volume", 0))),
+            "fillPrice": str(float(getattr(pos, "price_open", 0))),
+            "averagePrice": str(float(getattr(pos, "price_open", 0))),
+            "stopLoss": str(sl),
+            "sl": str(sl),
+            "takeProfit": str(tp),
+            "tp": str(tp),
+            "protectionConfirmed": sl > 0 and tp > 0,
+            "protected": sl > 0 and tp > 0,
+        }
 
     result_o, err_o = _safe_call(_mt5.orders_get, "orders_get")
-    if not err_o and result_o:
-        for order in result_o:
-            if str(getattr(order, "comment", "")) != client_id:
-                continue
-            return {
-                "order": {"id": str(getattr(order, "ticket", ""))},
-                "orderId": str(getattr(order, "ticket", "")),
-                "status": "ACCEPTED",
-                "protectionConfirmed": False,
-                "protected": False,
-            }
+    if err_o or result_o is None:
+        failure = err_o or _MT5CallFailure("orders_get", None, *_last_mt5_error_parts())
+        raise MT5OperationError(
+            "MT5 pending-order snapshot is unavailable",
+            phase="orders_get",
+            diagnostics={"failure": failure.as_dict()},
+        )
+    LOGGER.info("order_phase phase=orders_get completed")
+    for order in result_o:
+        if str(getattr(order, "comment", "")) != client_id:
+            continue
+        return {
+            "order": {"id": str(getattr(order, "ticket", ""))},
+            "orderId": str(getattr(order, "ticket", "")),
+            "status": "ACCEPTED",
+            "protectionConfirmed": False,
+            "protected": False,
+        }
 
-    return {"error": f"order not found: client_order_id={client_id}"}
+    return {
+        "status": "ORDER_NOT_FOUND",
+        "reconciliation": {
+            "checked_at": _now_iso(),
+            "history_deals_checked": True,
+            "positions_checked": True,
+            "orders_checked": True,
+        },
+        "errorMessage": "authoritative broker search found no matching order",
+    }
 
 
 def _process_close(req: dict[str, object]) -> dict[str, object]:
@@ -1851,13 +2100,15 @@ def _fastapi_call(
     """Convert typed handler results into sanitized REST responses."""
     try:
         result = handler(params)
-    except MT5OperationError:
+    except MT5OperationError as exc:
         return JSONResponse(
             status_code=503,
             content={
                 "error": "MT5 operation failed",
                 "status": "UNKNOWN",
                 "halt_new_entries": True,
+                "phase": exc.phase,
+                "diagnostics": exc.diagnostics,
             },
         )
     except ValueError as exc:
@@ -1870,6 +2121,7 @@ def _fastapi_call(
                 "error": "MT5 operation failed",
                 "status": "UNKNOWN",
                 "halt_new_entries": True,
+                "phase": "unknown",
             },
         )
     if result.get("error"):
@@ -1964,6 +2216,17 @@ def rest_order_status(account_id: str, client_order_id: str) -> JSONResponse:
         _rpc_order_status,
         {"client_order_id": client_order_id},
     )
+
+
+@app.post("/api/accounts/{account_id}/orders/preflight")
+async def rest_order_preflight(account_id: str, request: Request) -> JSONResponse:
+    guard = _fastapi_account_guard(account_id)
+    if guard is not None:
+        return guard
+    payload = await _fastapi_request_object(request)
+    if payload is None:
+        return JSONResponse(status_code=400, content={"error": "invalid JSON object"})
+    return _fastapi_call(_rpc_order_preflight, payload)
 
 
 @app.post("/api/accounts/{account_id}/positions/{position_id}/close")

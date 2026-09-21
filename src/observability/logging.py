@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +25,7 @@ ExecutionStatus = Literal[
     "REJECTED",
     "CANCELLED",
     "EXPIRED",
+    "ORDER_NOT_FOUND",
     "UNKNOWN",
     "NOT_ATTEMPTED",
 ]
@@ -125,6 +128,31 @@ def record_event(
     return safe
 
 
+AlertWebhookSender = Callable[[str, bytes, float], None]
+
+
+def _post_alert_webhook(url: str, payload: bytes, timeout: float) -> None:
+    """Send one sanitized JSON alert without exposing the destination in logs."""
+    request = Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout):  # noqa: S310
+        return
+
+
+def _valid_alert_webhook_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname is not None
+        and parsed.username is None
+        and parsed.password is None
+    )
+
+
 def emit_alert(
     logger: logging.Logger,
     condition: str,
@@ -132,11 +160,33 @@ def emit_alert(
     message: str,
     fields: Mapping[str, str] | None = None,
     secrets: tuple[str, ...] = (),
+    webhook_url: str | None = None,
+    webhook_timeout_seconds: float = 5.0,
+    webhook_sender: AlertWebhookSender | None = None,
 ) -> dict[str, str]:
-    """Emit a sanitized non-trading alert without changing runtime state."""
+    """Emit a sanitized alert and optionally deliver it to an HTTPS webhook."""
     safe = sanitize_fields(
         {"condition": condition, "message": message, **dict(fields or {})},
         secrets=secrets,
     )
     logger.warning("alert=%s", json.dumps(safe, sort_keys=True))
+    if webhook_url is None:
+        return safe
+    if (
+        not _valid_alert_webhook_url(webhook_url)
+        or webhook_timeout_seconds <= 0
+        or webhook_timeout_seconds > 30
+    ):
+        logger.error("alert_delivery_failed route=webhook error=invalid_configuration")
+        return safe
+    payload = json.dumps(
+        {"text": f"[{condition}] {safe['message']}", "alert": safe},
+        sort_keys=True,
+    ).encode("utf-8")
+    try:
+        (webhook_sender or _post_alert_webhook)(
+            webhook_url, payload, webhook_timeout_seconds
+        )
+    except (OSError, ValueError):
+        logger.error("alert_delivery_failed route=webhook error=transport")
     return safe

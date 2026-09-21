@@ -14,7 +14,7 @@ DEMO_ACCOUNT_ID: Final[str] = "463948680"
 
 DEFAULT_INSTRUMENT: Final[str] = "BTC_USD"
 ACTIVE_INSTRUMENTS: Final[frozenset[str]] = frozenset(
-    {"BTC_USD", "BTCUSD", "ETH_USD", "XAUUSDm", "EUR_USD"}
+    {"BTC_USD", "BTCUSD", "ETH_USD", "XAUUSDm", "EUR_USD", "EURUSDm"}
 )
 DAILY_DRAWDOWN_LIMIT: Final[Decimal] = Decimal("0.01")
 

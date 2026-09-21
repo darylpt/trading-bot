@@ -1,7 +1,7 @@
 # Phase 5 Specification — Reconciliation and Recovery
 ## Status
 
-**Implemented locally.** Durable reconciliation and halt behavior exist; restart and broker-state evidence remain required for verification.
+**Verified.** The controlled demo lifecycle reconciled and closed safely; deterministic failure-injection coverage passes; and a controlled daemon restart after a transient provider halt restored fresh readiness with durable halt state cleared only after operator review, zero open positions, and no duplicate submission.
 
 ## Problem
 
@@ -29,17 +29,20 @@ No new strategy, live mode, blind retries, or risk bypass.
 
 Requires verified demo execution and persistence contracts. Supplies authoritative reconciled order/position state and recovery decisions to operational readiness.
 
-## Acceptance evidence
+Acceptance evidence is recorded:
 
-Failure injection covers timeout, restart, duplicate submission, partial fill, unknown order, external position change, missing protection, and database failure. Recovery evidence proves safe halt, reconciliation, and restart continuity.
+- Targeted reconciliation and failure-injection suite: `27 passed`.
+- Controlled demo lifecycle: protected fill, broker/local reconciliation, safe close, durable `FILLED`/`CLOSED` state, and no residual broker position.
+- Controlled daemon restart: startup readiness passed after restart, durable trading halt remained cleared only after fresh readiness and operator review, and `0` broker/local open positions remained.
 
 ## Exit criteria
 
 Broker/local state converges deterministically or remains safely halted with a recorded reason.
-## Unresolved decisions
+## Decisions and remaining gate
 
-- Authoritative reconciliation cadence and broker history window.
-- Final netting/hedging policy and treatment of externally opened positions.
+- **Resolved:** reconcile at startup and before every retry or position increase; the active daemon performs readiness/reconciliation checks before entries.
+- **Resolved:** use one-position-per-instrument netting semantics for this demo path; externally opened or mismatched positions remain `EXTERNAL_REVIEW`/`HALTED` until operator-authorized closure.
+- **Verified:** the restart/recovery run converged with durable state, no duplicate submission, and no unprotected exposure.
 ## Executable slice contract — P5-S1 reconciliation and recovery
 
 **Precondition:** Phase 4 demo execution and the required persistence contract are verified.
@@ -63,9 +66,9 @@ Reconcile before any retry or position increase. Use client idempotency keys and
 
 ### Observed reconciliation blocker and corrective contract
 
-The current bridge returns a non-success response when no matching deal or open position is found. The adapter treats that response as broker unavailability, so the durable intent remains `UNKNOWN` even when the account snapshot contains no matching position.
+Historical attempts returned no matching deal or open position, but the prior bridge contract surfaced that absence as reconciliation unavailability. The corrected bridge queries deal history, open positions, and pending orders, returning a timestamped typed `ORDER_NOT_FOUND` result only when all authoritative snapshots succeed. Any transport or incomplete-history failure remains `UNKNOWN`.
 
-The reconciliation contract must distinguish `ORDER_NOT_FOUND` from transport failure while remaining fail-closed: query authoritative deal history and open positions, return a typed not-found result with evidence timestamps, keep the trading halt until the result is operator-reviewed, and never convert not-found into `FILLED`. Transport or incomplete-history failures remain `UNKNOWN`.
+The successful controlled smoke reconciled a filled `XAUUSDm` position, closed it safely, observed no matching open position afterward, and persisted a `CLOSED` position record. The adapter and durable execution state still preserve `ORDER_NOT_FOUND` distinctly from `UNKNOWN`; operator review is required for the earlier persisted halt, and `ORDER_NOT_FOUND` is never converted to `FILLED`.
 
 ### Acceptance scenarios
 

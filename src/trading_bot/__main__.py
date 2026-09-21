@@ -8,20 +8,22 @@ import math
 import os
 import time
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import datetime, time as datetime_time, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal
 
 
 from config.settings import Settings
-from domain.models import MarketCandle
+from domain.models import MarketCandle, NewsEvent
 from persistence.sqlite import (
     ExecutionLogRecord,
+    LLMDecisionRecord,
     SQLiteRepository,
     SessionMetricsRecord,
 )
 from execution.broker_adapter import BrokerConnectionError
+from observability.logging import emit_alert
 from observability.readiness import check_broker_demo_readiness
 from execution.executor import ExecutionGate
 from strategy.market_data import MarketDataError, load_csv_candles
@@ -38,6 +40,16 @@ from trading_bot.risk import RiskDecision, evaluate_signal
 from trading_bot.engine import PipelineConfig
 from trading_bot.runtime_config import RuntimeConfig
 from trading_bot.strategy import Signal, evaluate_strategy
+from sentiment.llm_client import (
+    LLMSentimentClient,
+    create_ollama_sentiment_adapter,
+    create_openai_sentiment_adapter,
+)
+from sentiment.models import SentimentAnalysisResult
+from sentiment.news import JsonNewsFeed, NewsFeedError
+from sentiment.runtime import SentimentGate
+from sentiment.news_gate import is_in_news_blackout
+from strategy.sessions import is_entry_window
 
 LOGGER = logging.getLogger(__name__)
 
@@ -65,6 +77,45 @@ def _broker_environment(value: str) -> Literal["paper", "demo"]:
     if value == "demo":
         return "demo"
     raise ValueError("BROKER_ENV must be paper or demo")
+
+
+class _UnavailableSentimentClient(LLMSentimentClient):
+    """Explicit fail-closed client used when no provider credential is configured."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(timeout_seconds=1.0)
+        self._reason = reason
+
+    def _request_json(self, context: str) -> str:
+        raise RuntimeError(self._reason)
+
+
+def _create_sentiment_client(settings: Settings) -> LLMSentimentClient:
+    if settings.sentiment_provider == "openai":
+        if not settings.openai_api_key:
+            return _UnavailableSentimentClient("OPENAI_API_KEY is unavailable")
+        return create_openai_sentiment_adapter(settings.openai_api_key)
+    if settings.ollama_base_url is None:
+        return _UnavailableSentimentClient("OLLAMA_BASE_URL is unavailable")
+    return create_ollama_sentiment_adapter(
+        str(settings.ollama_base_url),
+        model=settings.ollama_model,
+    )
+
+
+def _create_sentiment_gate(settings: Settings) -> SentimentGate:
+    return SentimentGate(
+        _create_sentiment_client(settings),
+        minimum_interval_seconds=float(settings.sentiment_interval_seconds),
+        threshold=float(settings.sentiment_threshold),
+    )
+
+
+def _create_news_feed(settings: Settings) -> JsonNewsFeed:
+    return JsonNewsFeed(
+        settings.news_events_path,
+        max_age_seconds=float(settings.news_max_age_seconds),
+    )
 
 
 def _optional_decimal_env(name: str) -> Decimal | None:
@@ -254,13 +305,33 @@ def run_tick(
     max_data_age_seconds: float | None = None,
     max_clock_drift_seconds: float | None = None,
     max_spread: Decimal | None = None,
+    forward_test_enabled: bool = False,
+    forward_test_window_start_utc: datetime_time = datetime_time(13, 0),
+    forward_test_window_end_utc: datetime_time = datetime_time(16, 0),
+    alert_webhook_url: str | None = None,
+    alert_webhook_timeout_seconds: float = 5.0,
+    alert_secrets: tuple[str, ...] = (),
+    sentiment_gate: SentimentGate | None = None,
+    sentiment_provider: str = "unknown",
+    sentiment_model: str = "unknown",
+    news_feed: JsonNewsFeed | None = None,
 ) -> SessionMetricsRecord:
-    """Fetch live or paper data, then evaluate strategy, risk, and execution."""
+    """Fetch data, apply technical and AI gates, then execute safely."""
     timestamp = current_time or datetime.now(timezone.utc)
     active_config = config or PipelineConfig()
     runtime_config = RuntimeConfig(repository.path)
     active_instrument = runtime_config.get_active_instrument()
     active_strategy = runtime_config.get_active_strategy()
+    news_events: tuple[NewsEvent, ...] = ()
+    news_feed_reason: str | None = None
+    if news_feed is not None:
+        try:
+            news_events = news_feed.load(
+                instrument=active_instrument,
+                current_time=timestamp,
+            )
+        except NewsFeedError as exc:
+            news_feed_reason = str(exc)
     if execution_gate is not None:
         execution_gate.reconcile()
     minimum_history = max(active_config.fast_period, active_config.slow_period) + 1
@@ -279,9 +350,12 @@ def run_tick(
             LOGGER.warning("live market data rejected reason=%s", type(exc).__name__)
             live_candles = ()
         candles = live_candles
+    circuit_timestamp = (
+        timestamp if current_time is not None else datetime.now(timezone.utc)
+    )
     circuit_reason, spread = _circuit_breaker_reason(
         candles,
-        timestamp=timestamp,
+        timestamp=circuit_timestamp,
         gateway=market_data_gateway,
         max_data_age_seconds=max_data_age_seconds,
         max_clock_drift_seconds=max_clock_drift_seconds,
@@ -292,12 +366,39 @@ def run_tick(
         reason=circuit_reason or "market data healthy",
         candle_timestamp=candles[-1].timestamp if candles else None,
         spread=spread,
-        updated_at=timestamp,
+        updated_at=circuit_timestamp,
     )
     trading_halted, halt_reason = repository.get_trading_halt()
-    if circuit_reason or trading_halted:
-        if trading_halted:
-            LOGGER.warning("entry halt active reason=%s", halt_reason)
+    outside_window = forward_test_enabled and not is_entry_window(
+        timestamp,
+        start_utc=forward_test_window_start_utc,
+        end_utc=forward_test_window_end_utc,
+    )
+    if circuit_reason:
+        emit_alert(
+            LOGGER,
+            "MARKET_DATA_HALTED",
+            message=circuit_reason,
+            fields={
+                "instrument": active_instrument,
+                "spread": str(spread) if spread is not None else "UNAVAILABLE",
+            },
+            secrets=alert_secrets,
+            webhook_url=alert_webhook_url,
+            webhook_timeout_seconds=alert_webhook_timeout_seconds,
+        )
+    if trading_halted:
+        LOGGER.warning("entry halt active reason=%s", halt_reason)
+        emit_alert(
+            LOGGER,
+            "TRADING_HALTED",
+            message=halt_reason,
+            fields={"instrument": active_instrument},
+            secrets=alert_secrets,
+            webhook_url=alert_webhook_url,
+            webhook_timeout_seconds=alert_webhook_timeout_seconds,
+        )
+    if circuit_reason or trading_halted or outside_window:
         signal = None
     else:
         try:
@@ -309,17 +410,96 @@ def run_tick(
                 strategy_name=active_strategy,
             )
         except (MarketDataError, ValueError) as exc:
-            LOGGER.warning("strategy evaluation rejected reason=%s", exc)
+            LOGGER.warning("strategy evaluation rejected reason=%s", type(exc).__name__)
             signal = None
+    sentiment_result: SentimentAnalysisResult | None = None
+    sentiment_reason: str | None = None
+    sentiment_approved = sentiment_gate is None
+    if signal is not None and sentiment_gate is not None:
+        if news_feed_reason is not None:
+            sentiment_reason = "NEWS_FEED_REJECTED"
+        elif is_in_news_blackout(
+            timestamp,
+            news_events,
+            buffer_minutes=active_config.news_buffer_minutes,
+        ):
+            sentiment_reason = "NEWS_BLACKOUT"
+        else:
+            sentiment_decision = sentiment_gate.evaluate(
+                signal,
+                news_events,
+                current_time=timestamp,
+            )
+            sentiment_result = sentiment_decision.sentiment
+            sentiment_approved = sentiment_decision.approved
+            sentiment_reason = sentiment_decision.reason
+            if sentiment_result is not None and sentiment_reason is not None:
+                if signal.action not in {"BUY", "SELL"}:
+                    raise ValueError("sentiment evaluation requires an entry signal")
+                technical_action: Literal["BUY", "SELL"] = (
+                    "BUY" if signal.action == "BUY" else "SELL"
+                )
+                repository.save_llm_decision(
+                    LLMDecisionRecord(
+                        evaluated_at=timestamp,
+                        instrument=active_instrument,
+                        strategy_name=active_strategy,
+                        technical_action=technical_action,
+                        provider=sentiment_provider,
+                        model=sentiment_model,
+                        decision=sentiment_result.decision,
+                        gate_reason=sentiment_reason,
+                        sentiment_score=(
+                            None
+                            if sentiment_result.sentiment_score is None
+                            else Decimal(str(sentiment_result.sentiment_score))
+                        ),
+                        confidence_score=Decimal(
+                            str(sentiment_result.confidence_score)
+                        ),
+                        risk_modifier=Decimal(str(sentiment_result.risk_modifier)),
+                        reasoning=sentiment_result.reasoning,
+                        news_event_count=len(news_events),
+                    )
+                )
+        if sentiment_reason is not None:
+            repository.save_execution_log(
+                ExecutionLogRecord(
+                    client_order_id=f"tick-{timestamp.isoformat()}",
+                    instrument=active_instrument,
+                    strategy_name=active_strategy,
+                    event_type=(
+                        "SENTIMENT_APPROVED"
+                        if sentiment_approved
+                        else "SENTIMENT_REJECTED"
+                    ),
+                    provider="sentiment",
+                    error_class=None if sentiment_approved else "SentimentGate",
+                    message=sentiment_reason,
+                    decision_rationale=(
+                        f"{signal.rationale}; sentiment={sentiment_reason}"
+                    ),
+                    reference_price=signal.reference_price,
+                    fast_average=signal.fast_average,
+                    slow_average=signal.slow_average,
+                    distance_to_crossover=signal.distance_to_crossover,
+                )
+            )
+    if news_feed_reason is not None:
+        LOGGER.warning("news feed rejected reason=%s", news_feed_reason)
     decision_rationale = (
         signal.rationale
         if signal is not None
         else (
             f"Emergency halt active: {halt_reason}"
             if trading_halted
+            else "Forward-test entry window closed"
+            if outside_window
             else "Strategy evaluation rejected before a signal was produced"
         )
     )
+    if signal is not None and sentiment_reason is not None:
+        decision_rationale = f"{decision_rationale}; sentiment={sentiment_reason}"
     repository.save_execution_log(
         ExecutionLogRecord(
             strategy_name=active_strategy,
@@ -343,6 +523,10 @@ def run_tick(
         )
     )
 
+    risk_fraction = Decimal("0.01")
+    if sentiment_result is not None:
+        risk_fraction *= Decimal(str(sentiment_result.risk_modifier))
+    entry_allowed = signal is not None and sentiment_approved
     risk_decision = (
         evaluate_signal(
             signal,
@@ -351,8 +535,9 @@ def run_tick(
             session_start_equity=session_start_equity,
             stop_distance=stop_distance,
             daily_drawdown_limit=daily_drawdown_limit,
+            risk_fraction=risk_fraction,
         )
-        if signal is not None
+        if entry_allowed and signal is not None
         else None
     )
     if risk_decision is not None and not risk_decision.approved:
@@ -376,6 +561,16 @@ def run_tick(
                 ),
             )
         )
+        if risk_decision.reason == "DAILY_DRAWDOWN_LIMIT_REACHED":
+            emit_alert(
+                LOGGER,
+                "DRAWDOWN_HALTED",
+                message=risk_decision.reason,
+                fields={"instrument": active_instrument},
+                secrets=alert_secrets,
+                webhook_url=alert_webhook_url,
+                webhook_timeout_seconds=alert_webhook_timeout_seconds,
+            )
     active_execution = execution_engine or PaperExecutionEngine(repository)
     execution_outcome = active_execution.process_tick(
         candles,
@@ -417,6 +612,18 @@ def run_tick(
                 ),
             )
         )
+        emit_alert(
+            LOGGER,
+            "EXECUTION_REJECTED",
+            message=execution_outcome.rejection_reason,
+            fields={
+                "instrument": active_instrument,
+                "provider": execution_provider,
+            },
+            secrets=alert_secrets,
+            webhook_url=alert_webhook_url,
+            webhook_timeout_seconds=alert_webhook_timeout_seconds,
+        )
 
     repository.record_session_metrics(timestamp.date())
     metrics = repository.get_session_metrics(timestamp.date())
@@ -456,11 +663,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
     settings = Settings()
     repository = SQLiteRepository(settings.session_database_path)
-    RuntimeConfig(repository.path)
+    runtime_config = RuntimeConfig(repository.path)
+    runtime_config.set_active_instrument(settings.instrument)
     account_equity = _optional_decimal_env("ACCOUNT_EQUITY")
     session_start_equity = _optional_decimal_env("SESSION_START_EQUITY")
     stop_distance = _optional_decimal_env("RISK_STOP_DISTANCE")
     market_data_gateway = _create_market_data_gateway(settings)
+    sentiment_gate = _create_sentiment_gate(settings)
+    news_feed = _create_news_feed(settings)
     logging.basicConfig(level=logging.INFO)
     execution_engine: PaperExecutionEngine | BrokerDemoExecutionEngine | None = None
     execution_gate: ExecutionGate | None = None
@@ -500,6 +710,23 @@ def main(argv: Sequence[str] | None = None) -> None:
                 )
             )
         except (BrokerConnectionError, MarketDataError, ValueError) as exc:
+            emit_alert(
+                LOGGER,
+                "BROKER_READINESS_HALTED",
+                message=type(exc).__name__,
+                secrets=tuple(
+                    secret
+                    for secret in (settings.broker_token, settings.openai_api_key)
+                    if secret
+                ),
+                webhook_url=(
+                    str(settings.alert_webhook_url)
+                    if settings.alert_route == "webhook"
+                    and settings.alert_webhook_url is not None
+                    else None
+                ),
+                webhook_timeout_seconds=float(settings.alert_webhook_timeout_seconds),
+            )
             repository.set_trading_halt(True, reason=type(exc).__name__)
             repository.close()
             raise BrokerConnectionError(
@@ -541,6 +768,29 @@ def main(argv: Sequence[str] | None = None) -> None:
             max_data_age_seconds=float(settings.max_data_age_seconds),
             max_clock_drift_seconds=float(settings.max_clock_drift_seconds),
             max_spread=settings.max_spread,
+            forward_test_enabled=settings.forward_test_enabled,
+            forward_test_window_start_utc=settings.forward_test_window_start_utc,
+            forward_test_window_end_utc=settings.forward_test_window_end_utc,
+            alert_webhook_url=(
+                str(settings.alert_webhook_url)
+                if settings.alert_route == "webhook"
+                and settings.alert_webhook_url is not None
+                else None
+            ),
+            alert_webhook_timeout_seconds=float(settings.alert_webhook_timeout_seconds),
+            alert_secrets=tuple(
+                secret
+                for secret in (settings.broker_token, settings.openai_api_key)
+                if secret
+            ),
+            sentiment_gate=sentiment_gate,
+            sentiment_provider=settings.sentiment_provider,
+            sentiment_model=(
+                settings.ollama_model
+                if settings.sentiment_provider == "ollama"
+                else "gpt-4o-mini"
+            ),
+            news_feed=news_feed,
         )
 
     try:

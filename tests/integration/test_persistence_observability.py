@@ -140,6 +140,7 @@ def test_application_once_runs_tick_and_exits_without_sleep(
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.delenv("MARKET_DATA_PATH", raising=False)
     monkeypatch.setenv("MAX_DATA_AGE_SECONDS", "999999999")
+    monkeypatch.setenv("NEWS_EVENTS_PATH", str(tmp_path / "missing-news.json"))
 
     def unexpected_sleep(_: float) -> None:
         raise AssertionError("--once must not enter the sleep loop")
@@ -149,9 +150,15 @@ def test_application_once_runs_tick_and_exits_without_sleep(
 
     application.main(["--once"])
     assert (tmp_path / "market_data.csv").is_file()
-    assert not [
-        record for record in caplog.records if record.levelno >= logging.WARNING
+    warning_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
     ]
+    assert any(
+        "configured news feed could not be read" in message
+        for message in warning_messages
+    )
 
     repository = SQLiteRepository(tmp_path / "session_metrics.db")
     latest = repository.get_latest_metrics(limit=1)

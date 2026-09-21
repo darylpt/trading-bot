@@ -26,7 +26,7 @@ SIGNAL = {
     "reference_price": "1.1000",
 }
 VALID_JSON = (
-    '{"decision":"CONFIRM","confidence_score":0.9,'
+    '{"sentiment_score":0.8,"confidence_score":0.9,'
     '"reasoning":"supportive headline","risk_modifier":1.0}'
 )
 

@@ -53,6 +53,19 @@ def is_boundary_window(
     )
 
 
+def is_entry_window(
+    timestamp: datetime,
+    *,
+    start_utc: time = time(13, 0),
+    end_utc: time = time(16, 0),
+) -> bool:
+    """Return whether a weekday timestamp is inside the approved entry window."""
+    if start_utc >= end_utc:
+        raise ValueError("entry window must end after it starts")
+    current = timestamp.astimezone(timezone.utc)
+    return current.weekday() < 5 and start_utc <= current.time() < end_utc
+
+
 def can_enter(
     *, observed_at: datetime, now: datetime, policy: SessionPolicy | None = None
 ) -> bool:

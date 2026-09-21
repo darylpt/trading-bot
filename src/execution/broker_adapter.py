@@ -27,6 +27,7 @@ ExecutionStatus = Literal[
     "REJECTED",
     "CANCELLED",
     "EXPIRED",
+    "ORDER_NOT_FOUND",
     "UNKNOWN",
 ]
 
@@ -454,6 +455,41 @@ class BaseBroker:
         except (TypeError, ValueError) as exc:
             raise BrokerConnectionError("broker order response was invalid") from exc
 
+    def preflight_order(self, payload: BrokerOrderPayload) -> ExecutionResult:
+        """Run broker order validation without submitting a transaction."""
+        started = time.perf_counter()
+        response = self._request(
+            "POST",
+            self._preflight_path(),
+            body=self._order_body(payload),
+            safe_read=True,
+        )
+        latency_ms = round((time.perf_counter() - started) * 1000)
+        try:
+            return ExecutionResult(
+                client_order_id=payload.client_order_id,
+                provider_order_id=_optional_text(
+                    _first_value(
+                        response,
+                        "orderCreateTransaction",
+                        "order",
+                        "orderId",
+                        "id",
+                    )
+                ),
+                status=_execution_status(response.get("status", "UNKNOWN")),
+                filled_quantity=None,
+                fill_price=None,
+                latency_ms=latency_ms,
+                protection_confirmed=_protection_confirmation(response),
+                environment=payload.environment,
+                rejection_reason=_optional_text(response.get("errorMessage")),
+            )
+        except (TypeError, ValueError) as exc:
+            raise BrokerConnectionError(
+                "broker order preflight response was invalid"
+            ) from exc
+
     def cancel_order(self, client_order_id: str) -> ExecutionResult:
         """Cancel one order through the demo endpoint without retrying."""
         if not client_order_id:
@@ -615,6 +651,9 @@ class BaseBroker:
 
     def _orders_path(self) -> str:
         return f"/api/accounts/{self.account_id}/orders"
+
+    def _preflight_path(self) -> str:
+        return f"{self._orders_path()}/preflight"
 
     def _order_path(self, client_order_id: str) -> str:
         return f"{self._orders_path()}/{client_order_id}"
@@ -819,6 +858,8 @@ def _execution_status(value: object) -> ExecutionStatus:
         return "CANCELLED"
     if status == "EXPIRED":
         return "EXPIRED"
+    if status == "ORDER_NOT_FOUND":
+        return "ORDER_NOT_FOUND"
     return "UNKNOWN"
 
 

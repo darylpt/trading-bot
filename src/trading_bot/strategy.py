@@ -1,4 +1,4 @@
-"""Simple moving-average crossover strategy for paper-trading ticks."""
+"""Exponential moving-average crossover strategy for paper-trading ticks."""
 
 from __future__ import annotations
 
@@ -45,10 +45,16 @@ class Signal:
         return self.fast_average - self.slow_average
 
 
-def _moving_average(values: tuple[Decimal, ...], period: int) -> Decimal | None:
+def _exponential_moving_average(
+    values: tuple[Decimal, ...], period: int
+) -> Decimal | None:
     if len(values) < period:
         return None
-    return sum(values[-period:], Decimal(0)) / Decimal(period)
+    multiplier = Decimal("2") / Decimal(period + 1)
+    average = sum(values[:period], Decimal(0)) / Decimal(period)
+    for value in values[period:]:
+        average += (value - average) * multiplier
+    return average
 
 
 def moving_average_signal(
@@ -59,7 +65,7 @@ def moving_average_signal(
     current_time: datetime | None = None,
     instrument: str = "EUR_USD",
 ) -> Signal:
-    """Return BUY/SELL only on a fresh fast/slow moving-average crossover."""
+    """Return BUY/SELL only on a fresh fast/slow EMA crossover."""
     if fast_period <= 0 or slow_period <= 0 or fast_period >= slow_period:
         raise ValueError("moving-average periods must be positive and fast < slow")
 
@@ -70,10 +76,10 @@ def moving_average_signal(
     reference_price = candles[-1].close if candles else None
     closes = tuple(candle.close for candle in candles)
     previous_closes = closes[:-1]
-    previous_fast = _moving_average(previous_closes, fast_period)
-    previous_slow = _moving_average(previous_closes, slow_period)
-    latest_fast = _moving_average(closes, fast_period)
-    latest_slow = _moving_average(closes, slow_period)
+    previous_fast = _exponential_moving_average(previous_closes, fast_period)
+    previous_slow = _exponential_moving_average(previous_closes, slow_period)
+    latest_fast = _exponential_moving_average(closes, fast_period)
+    latest_slow = _exponential_moving_average(closes, slow_period)
 
     if (
         previous_fast is None

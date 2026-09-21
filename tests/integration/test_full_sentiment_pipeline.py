@@ -116,7 +116,7 @@ def test_full_pipeline_confirms_sizes_dispatches_and_persists(tmp_path: Path) ->
     fixture = _fixture(tmp_path)
     llm = MockSentimentClient(
         SentimentAnalysisResult(
-            decision="ADJUST_RISK",
+            sentiment_score=0.8,
             confidence_score=0.9,
             reasoning="supportive macro context",
             risk_modifier=0.5,
@@ -152,7 +152,7 @@ def test_news_blackout_blocks_before_llm_and_execution(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     llm = MockSentimentClient(
         SentimentAnalysisResult(
-            decision="CONFIRM",
+            sentiment_score=0.8,
             confidence_score=1.0,
             reasoning="positive",
         )
@@ -181,7 +181,7 @@ def test_rejected_sentiment_aborts_before_execution(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     llm = MockSentimentClient(
         SentimentAnalysisResult(
-            decision="REJECT",
+            sentiment_score=0.0,
             confidence_score=0.9,
             reasoning="insufficient confirmation",
         )
@@ -214,7 +214,7 @@ def test_restart_reconciles_durable_unknown_without_resubmission(
     candles = load_csv_candles(fixture.candles_path, minimum_history=6)
     llm = MockSentimentClient(
         SentimentAnalysisResult(
-            decision="CONFIRM",
+            sentiment_score=0.8,
             confidence_score=1.0,
             reasoning="deterministic paper approval",
         )

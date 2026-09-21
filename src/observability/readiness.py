@@ -125,20 +125,23 @@ def check_broker_demo_readiness(
     except sqlite3.Error as exc:
         raise BrokerConnectionError("readiness database is not writable") from exc
 
-    candle_period = timedelta(minutes=15 if timeframe == "15m" else 60)
-    candle_close_at = _utc(candles[-1].timestamp) + candle_period
-    timestamps = (
-        account.captured_at,
-        metadata.captured_at,
-        session.captured_at,
-        quote.observed_at,
-        candle_close_at,
-    )
     max_age = float(settings.max_data_age_seconds)
     max_future_age = float(settings.max_clock_drift_seconds)
-    for observed in timestamps:
+    candle_period = timedelta(minutes=15 if timeframe == "15m" else 60)
+    candle_close_at = _utc(candles[-1].timestamp) + candle_period
+    timestamp = (
+        _utc(checked_at) if checked_at is not None else datetime.now(timezone.utc)
+    )
+    freshness_limits = (
+        (account.captured_at, max_age),
+        (metadata.captured_at, max_age),
+        (session.captured_at, max_age),
+        (quote.observed_at, max_age),
+        (candle_close_at, max_age + candle_period.total_seconds()),
+    )
+    for observed, allowed_age in freshness_limits:
         age = (timestamp - _utc(observed)).total_seconds()
-        if age < -max_future_age or age > max_age:
+        if age < -max_future_age or age > allowed_age:
             raise BrokerConnectionError(
                 "broker readiness data is stale or from the future"
             )

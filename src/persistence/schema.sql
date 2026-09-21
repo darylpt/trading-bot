@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS trade_logs (
     take_profit_price NUMERIC NOT NULL,
     account_equity NUMERIC NOT NULL,
     risk_fraction NUMERIC NOT NULL CHECK (risk_fraction <= 0.01),
-    status TEXT NOT NULL CHECK (status IN ('PENDING_SUBMISSION', 'PENDING', 'FILLED', 'PARTIALLY_FILLED', 'ACCEPTED', 'REJECTED', 'CANCELLED', 'EXPIRED', 'UNKNOWN')),
+    status TEXT NOT NULL CHECK (status IN ('PENDING_SUBMISSION', 'PENDING', 'FILLED', 'PARTIALLY_FILLED', 'REJECTED', 'CANCELLED', 'EXPIRED', 'ORDER_NOT_FOUND', 'ACCEPTED', 'UNKNOWN')),
     environment TEXT NOT NULL CHECK (environment IN ('PAPER', 'DEMO')),
     rejection_reason TEXT,
     opened_at TEXT NOT NULL
@@ -32,6 +32,27 @@ CREATE TABLE IF NOT EXISTS execution_logs (
     slippage NUMERIC,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS llm_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    evaluated_at TEXT NOT NULL,
+    instrument TEXT NOT NULL,
+    strategy_name TEXT NOT NULL,
+    technical_action TEXT NOT NULL CHECK (technical_action IN ('BUY', 'SELL')),
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('CONFIRM', 'REJECT', 'ADJUST_RISK')),
+    gate_reason TEXT NOT NULL,
+    sentiment_score NUMERIC,
+    confidence_score NUMERIC NOT NULL CHECK (confidence_score >= 0 AND confidence_score <= 1),
+    risk_modifier NUMERIC NOT NULL CHECK (risk_modifier > 0 AND risk_modifier <= 1),
+    reasoning TEXT NOT NULL,
+    news_event_count INTEGER NOT NULL CHECK (news_event_count >= 0),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_decisions_scope
+    ON llm_decisions (instrument, strategy_name, evaluated_at DESC);
 
 CREATE TABLE IF NOT EXISTS session_metrics (
     session_date TEXT PRIMARY KEY,

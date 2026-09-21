@@ -16,35 +16,44 @@ Use these statuses instead of treating a checkbox as proof of completion:
 
 `VERIFIED` is the only status that satisfies an SDD acceptance gate. `IMPLEMENTED` must never be described as complete. Every `VERIFIED` task should link to its evidence or command output.
 
-## Current phase — Phase 0: Secure and Freeze the Baseline
+## Current phase — Phase 7: Controlled Demo Forward Test
 
-- **IMPLEMENTED** — Baseline safety contracts and runtime mode matrix are in place; local evidence is recorded below.
-- **IMPLEMENTED** — Credential safety is enforced by environment-only loading and sanitized logging; external credential rotation remains operator-owned.
-- **IMPLEMENTED** — Exness MT5 demo architecture, `BaseBroker`, `SimulatedBroker`/simulated quote source, and explicit unavailable LIVE mode are implemented.
-- **IMPLEMENTED** — Demo endpoint allowlist, no-fallback behavior, Compose least-privilege injection, and dashboard loopback binding are implemented.
-- **IMPLEMENTED** — Local simulated baseline runs through the production entrypoint without broker credentials.
-- **IMPLEMENTED** — Legacy environment schema keys are explicitly modeled with safe compatibility rules; the verified Exness symbol is `XAUUSDm`.
-- **EVIDENCE** — `docs/PHASE-0-BASELINE-MANIFEST.md` records Python, dependency/fixture/schema hashes, local `SIMULATED` smoke, secret-artifact checks, image inspection, and command outputs.
-- **BLOCKED** — External credential rotation and operator acceptance sign-off remain outside repository control.
-- **IMPLEMENTED** — Native Windows MT5 FastAPI/uvicorn HTTPS bridge exists at `src/bridge/mt5_host_bridge.py`; requested RPC aliases, mandatory SL/TP validation, symbol-supported filling-mode selection, retcode mapping, and UNKNOWN/halt errors are covered by focused tests and static checks.
-- **EVIDENCE** — After the readiness latency fix, the bridge passed a complete read-only check for `XAUUSDm`: account equity `10000.0`, session open, spread `0.260`, `32` closed candles, writable database, and clock drift below one second.
-- **IMPLEMENTED** — Broker backfill now preserves known session/maintenance gaps without synthesizing candles; arbitrary gaps remain a fail-closed condition.
-- **BLOCKED** — Four controlled `0.01` LONG demo submissions with attached exits did not produce a protected fill. The first two returned `UNKNOWN` and reconciled to no matching broker order/open position; the third returned `UNKNOWN` with unavailable reconciliation; after credential rotation, the fourth also returned `UNKNOWN`, with no open position and reconciliation still unavailable. Durable local state remains halted; no further blind retry is authorized.
-- **BLOCKED** — Protected demo closure and multi-day forward-test evidence remain; operator acceptance sign-off is still an external gate.
-- **RESOLVED** — The credential-bearing validation-output issue was fixed with `hide_input_in_errors=True`; the affected credentials were rotated before the latest retry.
-- **NEXT CORRECTIVE SLICE** — Instrument `order_check`/`order_send` with sanitized MT5 phase diagnostics; return deterministic precheck failures as `REJECTED`; add typed `ORDER_NOT_FOUND` reconciliation distinct from transport failure; add non-submitting order-preflight tests before any further demo submission.
+- **VERIFIED** — Phase 0 secure baseline; evidence is recorded in `docs/PHASE-0-BASELINE-MANIFEST.md`.
+- **VERIFIED** — Phase 1 broker-demo read-only readiness; fresh bridge evidence is recorded below.
+- **VERIFIED** — Phase 2 market-data continuity and broker backfill; deterministic continuity tests and controlled broker quote/candle polling evidence are recorded. A later provider freshness incident remains safely halted under Phase 7.
+- **VERIFIED** — Phase 3 broker-aware risk; deterministic guardrail tests, live Exness metadata, one-percent risk smoke, and protected demo lifecycle evidence are recorded.
+- **VERIFIED** — Phase 4 protected demo lifecycle; the controlled XAUUSDm fill/reconcile/close evidence is recorded.
+- **VERIFIED** — Phase 5 reconciliation/recovery; deterministic failure injection, controlled daemon restart/recovery, and zero residual positions are recorded.
+- **VERIFIED** — Phase 6 operational hardening; sanitized structured alerts, durable controls, forward-test window enforcement, and provider-failure recovery are recorded.
+- **IMPLEMENTED** — Hybrid runtime cutover: production ticks now load typed fresh news, call the configured strict-JSON sentiment provider on a bounded cadence, apply directional thresholds and risk modifiers, and block entries on unavailable sentiment before the existing risk/execution gates. Evidence: `tests/integration/test_hybrid_runtime.py`, full host suite `155 passed, 1 skipped`, Ruff, format, and mypy.
+- **IN_PROGRESS** — Phase 7 paper-only runtime remains configured for XAUUSDm, the 13:00–16:00 UTC entry window, and structured alerts; the daemon is halted because the post-resync broker feed is stale.
+- **BLOCKED** — Phase 7 cannot be marked verified until the multi-day evidence package, restart/reconciliation review, and final demo-only go/no-go decision are recorded.
+
+- **EVIDENCE** — Windows time synchronization now passes: `Leap Indicator: 0`, `Source: pool.ntp.org,0x9`, and stripchart offset approximately `+0.56s`.
+- **EVIDENCE** — Restarted bridge health passed, but XAUUSDm quote age was approximately `47,300s` and latest candle age approximately `48,977s`; startup persisted `StaleMarketDataError`, retained zero open positions, and submitted no order.
+- **EVIDENCE** — Latest offline checks: host `pytest tests/unit tests/integration` `139 passed, 1 skipped`; Docker Compose test `138 passed, 1 skipped`; Ruff lint passed; Ruff format check passed; mypy passed; NTP stripchart offset approximately `+0.36s`.
+- **EVIDENCE** — Local setup probe: Ollama `0.34.2` is installed; `llama3.2:3b` is GPU-loaded and the typed adapter returned strict sentiment JSON in `0.91s`. The paper/demo startup probe failed closed because the configured MT5 bridge at `127.0.0.1:18812` refused the connection; no order was submitted.
+- **EVIDENCE** — Current supervised bridge start succeeded: MT5 initialized against `Exness-MT5Trial17`, HTTPS bridge ready on port `18812`, and broker health reported connected/authorized. The immediate paper readiness probe then failed closed on stale `XAUUSDm` quote data; current UTC date is Saturday.
+- **IMPLEMENTED** — Forex Factory calendar normalization now accepts the approved XML/JSON formats, filters USD/All events for `XAUUSDm`, rejects unknown timestamps/impact values, and atomically refreshes `data/news_events.json` through `tools.refresh_news_events`. Contract tests pass; the public endpoint currently returns HTTP `429`, so continuous refresh is not verified.
+- **BLOCKED** — The five-day paper run remains stopped until the broker session reopens with fresh quote/candle data and the news provider permits a successful refresh.
+- **IMPLEMENTED** — Dashboard now exposes effective paper readiness, MT5 bridge health, broker halt state, Ollama model/API state, typed news snapshot freshness, database event age, and provider diagnostics. Browser smoke on the rebuilt Docker image showed `Bridge READY`, `Ollama READY`, `News feed READY`, and `Broker gate HALTED` with `StaleMarketDataError`; host verification passed `157 tests, 1 skipped`, mypy, Ruff, format, and compile checks.
+- **IMPLEMENTED** — LLM sentiment audit is now durable in `llm_decisions`, recording provider/model, technical signal, derived decision, score, confidence, risk modifier, gate reason, bounded reasoning, and news-event count without raw prompts or payloads. The dashboard renders the latest gate result and recent history. Hybrid runtime tests passed `2`, persistence/observability focus passed `11`, full suite passed `157 tests, 1 skipped`, and browser smoke displayed a populated Ollama `REJECT` decision with score `0.2`, confidence `0.4`, risk modifier `0.5`, and `SENTIMENT_BELOW_BUY_THRESHOLD`.
+- **IMPLEMENTED** — Added the EODHD historical calendar contract, allowlisted HTTPS client, USD/All filtering for `XAUUSDm`, strict timestamp/impact validation, content-addressed immutable archives, and `tools.import_historical_calendar`. Fixture tests pass; live import is intentionally blocked until a licensed EODHD API key is supplied through `HISTORICAL_CALENDAR_API_KEY` (the no-key CLI smoke rejected closed).
 
 ## Specification backlog after Phase 0
 
-The executable contracts are implemented locally; they remain unverified until their external/demo acceptance gates pass.
+Phase contracts retain their own evidence gates; current status is explicit below.
 
-- **IMPLEMENTED** — `docs/PHASE-1-BROKER-READINESS-SPEC.md` — readiness checks cover authentication, account, session, quote, metadata, history, database, freshness, and clock drift.
-- **IMPLEMENTED** — `docs/PHASE-2-MARKET-DATA-SPEC.md` — broker candle polling, validation, backfill, quote freshness, and no simulated fallback in demo mode.
-- **IMPLEMENTED** — `docs/PHASE-3-BROKER-AWARE-RISK-SPEC.md` — tick-value sizing, executable quote checks, spread, stop/freeze, margin, and equity revalidation.
-- **IMPLEMENTED** — `docs/PHASE-4-DEMO-EXECUTION-SPEC.md` — demo execution engine uses the single gate, idempotency, protective-exit confirmation, and post-fill reconciliation.
-- **IMPLEMENTED** — `docs/PHASE-5-RECONCILIATION-RECOVERY-SPEC.md` — durable order reconciliation, account-position reconstruction, and persistent halt behavior.
-- **IMPLEMENTED** — `docs/PHASE-6-OPERATIONAL-HARDENING-SPEC.md` — separate readiness state, sanitized alerts, durable controls, and Compose isolation.
-- **BLOCKED** — `docs/PHASE-7-FORWARD-TEST-SPEC.md` — controlled multi-day demo evidence cannot run without approved external account, instrument, schedule, alert route, and thresholds.
+- **VERIFIED** — `docs/PHASE-1-BROKER-READINESS-SPEC.md` — fresh Exness MT5 read-only readiness passed for `XAUUSDm`.
+- **VERIFIED** — `docs/PHASE-2-MARKET-DATA-SPEC.md` — broker candle polling, validation, backfill, quote freshness, no simulated fallback in demo mode, controlled live polling, and safe stale-data halt are recorded.
+- **VERIFIED** — `docs/PHASE-3-BROKER-AWARE-RISK-SPEC.md` — broker metadata sizing, tick-value conversion, executable risk limits, revalidation, protection requirements, and no-bypass execution evidence are recorded.
+- **VERIFIED** — `docs/PHASE-4-DEMO-EXECUTION-SPEC.md` — protected demo fill, exit confirmation, reconciliation, safe close, and durable `FILLED`/`CLOSED` state are recorded.
+- **VERIFIED** — `docs/PHASE-5-RECONCILIATION-RECOVERY-SPEC.md` — durable order reconciliation, account-position reconstruction, persistent halt behavior, controlled restart/recovery, and no duplicate exposure are recorded.
+- **VERIFIED** — `docs/PHASE-6-OPERATIONAL-HARDENING-SPEC.md` — readiness, sanitized structured alerts, optional HTTPS webhook delivery, durable controls, Compose isolation, window enforcement, and failure/recovery evidence are recorded.
+- **EVIDENCE** — Framework and runtime verification: host `pytest` `144 passed, 1 skipped`; Docker Compose test `138 passed, 1 skipped`; compile, mypy, Ruff check, and Ruff format checks pass.
+- **EVIDENCE** — Fresh broker-demo readiness and recovery: bridge authorized, equity `9999.14`, XAUUSDm spread `0.260`, `256` candles, clock drift `0.001s`, writable database, and `0` broker open positions; a transient provider halt was persisted, then cleared only after a fresh readiness pass and operator review.
+- **BLOCKED** — The host clock issue is resolved; the remaining blocker is stale broker market data after the supervised process exit. Keep the daemon stopped and halt active until fresh quote/candle readiness passes.
+- **IN_PROGRESS** — `docs/PHASE-7-FORWARD-TEST-SPEC.md` — multi-day evidence collection is active; completion still requires the full run, restart/reconciliation evidence, incident dispositions, and final review.
 
 ## Evidence rule
 

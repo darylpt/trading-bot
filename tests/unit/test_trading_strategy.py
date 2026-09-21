@@ -46,6 +46,17 @@ def test_moving_average_crossover_emits_buy_sell_and_hold() -> None:
     assert hold.action == "HOLD"
     assert "No crossover" in hold.rationale
 
+def test_moving_average_signal_uses_exponential_averages() -> None:
+    signal = moving_average_signal(
+        _candles(["1.0000", "1.0000", "1.0000", "1.0000", "3.0000"]),
+        fast_period=2,
+        slow_period=4,
+    )
+
+    assert signal.action == "BUY"
+    assert signal.fast_average == Decimal(7) / Decimal(3)
+    assert signal.slow_average == Decimal("1.8")
+
 
 def test_moving_average_strategy_holds_during_warmup() -> None:
     signal = moving_average_signal(

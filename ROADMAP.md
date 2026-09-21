@@ -2,7 +2,7 @@
 
 This roadmap is the delivery contract for the paper/demo trading system. Work advances in phase order and preserves fail-closed risk and execution boundaries.
 
-## Phase 0 — Secure and Freeze the Baseline (Implemented locally / unverified)
+## Phase 0 — Secure and Freeze the Baseline (Verified)
 
 - Establish explicit `SIMULATED`, `BROKER_DEMO`, and unavailable `LIVE` runtime modes.
 - Select Exness MT5 as the broker-demo architecture behind `BaseBroker`; retain `SimulatedBroker` for local paper testing.
@@ -11,7 +11,7 @@ This roadmap is the delivery contract for the paper/demo trading system. Work ad
 - Freeze a reproducible local simulation baseline with configuration, dependency, fixture, schema, and command evidence.
 - Complete the acceptance scenarios in `docs/PHASE-0-SECURE-BASELINE-SPEC.md`.
 
-Phase 0 is implemented locally but is not verified until its external/demo evidence is recorded. The governing contract is `docs/PHASE-0-SECURE-BASELINE-SPEC.md`; the local evidence manifest is `docs/PHASE-0-BASELINE-MANIFEST.md`.
+Phase 0 is verified against the recorded baseline manifest, fresh bridge/readiness evidence, protected demo lifecycle evidence, and operator acceptance record. It does not enable live trading.
 
 ## Phase 1 — Runtime Foundation (Complete)
 
@@ -47,7 +47,7 @@ Phase 0 is implemented locally but is not verified until its external/demo evide
 - Reconcile fills and position state without bypassing the execution gate.
 - Update `session_metrics.db` with position, realized P&L, and win/loss outcomes.
 
-## Phase 5 — Broker-Connected Demo Trading (Not complete)
+## Phase 5 — Broker-Connected Demo Trading (Verified)
 
 - Implement the Exness MT5 demo deployment and adapter contract behind `BaseBroker`.
 - Separate `SIMULATED` and `BROKER_DEMO` modes; broker-demo failures MUST halt entries rather than use local fallback data.
@@ -58,23 +58,30 @@ Phase 0 is implemented locally but is not verified until its external/demo evide
 - Add client idempotency, partial/unknown-order handling, broker-position reconciliation, and restart recovery.
 - Prove the complete lifecycle with an opt-in demo smoke test.
 
-## Phase 6 — Operational Hardening (Not complete)
+Recorded evidence includes the protected `0.01` LONG XAUUSDm fill/reconcile/close lifecycle, fresh read-only readiness, deterministic failure injection, and a controlled daemon restart with zero residual positions and no duplicate submission. Multi-day operational evidence remains in Phase 7.
+
+## Phase 6 — Operational Hardening (Verified)
 
 - Upgrade process health into explicit trading-readiness states.
-- Persist sanitized decision, quote, risk, order, fill, reconciliation, halt, and recovery records.
-- Add alerts for disconnects, stale data, clock drift, unprotected positions, unknown orders, reconciliation mismatches, drawdown halts, database failures, and fallback activation.
+- Persist sanitized decision, quote, risk, order, fill, reconciliation, halt, recovery, and configuration-version records.
+- Emit sanitized structured-log alerts and support optional HTTPS webhook delivery for broker disconnects, stale data, clock drift, unprotected positions, unknown orders, reconciliation mismatches, drawdown halts, database failures, and repeated rejections.
+- Enforce the configured forward-test entry window without bypassing the execution gate.
 - Resolve SQLite/PostgreSQL ownership and remove unused hard startup dependencies.
 - Add failure-injection coverage for provider, data, risk, execution, persistence, and restart failures.
 
-## Phase 7 — Controlled Forward Test (Not complete)
+Phase 6 is verified: the structured-alert failure/recovery record is archived in the Phase 5/6 specifications and current runtime evidence; external webhook delivery remains optional.
+
+## Phase 7 — Controlled Forward Test (In progress / unverified)
 
 - Run a multi-day demo-only forward test with no live endpoint or live credentials.
 - Measure uptime, data continuity, spread, slippage, latency, rejected orders, protective-exit confirmation, P&L reconciliation, and restart recovery.
 - Review every halt and unexplained mismatch before changing strategy complexity or risk.
 
+The controlled paper-only runtime remains configured for the approved XAUUSDm window and structured alert route. Windows time synchronization now passes, but the bridge has no fresh XAUUSDm tick after the supervised process exit; restart validation rejected approximately `47,300s`-old quote data. Phase 7 remains unverified and fail-closed pending fresh broker data and restart-incident review.
+
 The canonical requirements and acceptance evidence for Phases 5–7 are in `docs/PAPER-TRADING-READINESS.md`.
 
-All phases now have both a strategic contract and an executable slice contract in `docs/PHASE-*-SPEC.md`. These contracts define implementation ownership, state transitions, failure policy, acceptance scenarios, smoke scenarios, verification commands, and exit gates. Contract creation does not advance phase status: Phase 0 remains proposed until its evidence gates pass.
+All phases now have both a strategic contract and an executable slice contract in `docs/PHASE-*-SPEC.md`. Phases 0–6 are verified against recorded evidence; Phase 7 retains its multi-day operational acceptance gate and is currently blocked on provider freshness.
 
 ## Resume Verification
 

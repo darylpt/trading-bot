@@ -25,7 +25,7 @@ class StrictModel(BaseModel):
 
 class MarketCandle(StrictModel):
     instrument: str = Field(min_length=1)
-    timeframe: Literal["15m", "1h"]
+    timeframe: Literal["1m", "5m", "15m", "1h"]
     timestamp: datetime
     open: Decimal = Field(gt=0)
     high: Decimal = Field(gt=0)
@@ -224,6 +224,7 @@ class ExecutionResult(StrictModel):
         "REJECTED",
         "CANCELLED",
         "EXPIRED",
+        "ORDER_NOT_FOUND",
         "UNKNOWN",
     ]
     filled_quantity: Decimal | None = Field(default=None, gt=0)

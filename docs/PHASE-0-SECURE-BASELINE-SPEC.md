@@ -2,7 +2,7 @@
 
 ## Status
 
-**Implemented locally.** Local safety checks pass. The verified broker symbol is `XAUUSDm`; the rotated credentials authenticate the bridge and read-only demo readiness passes. Protected demo order/reconciliation evidence remains blocked because order submission returns sanitized `UNKNOWN`/HTTP `503` without phase-specific MT5 diagnostics; operator acceptance review and forward-test evidence remain required for verification.
+**Verified.** The explicit modes, Exness MT5 Option B bridge, credential hygiene, endpoint policy, reproducible simulation, fresh broker-demo readiness, protected demo lifecycle evidence, and operator acceptance record are complete. Phase 7 remains a separate multi-day operational gate.
 
 The repository now uses one explicit Exness MT5 Option B host-bridge contract. `SIMULATED` remains local-only; `BROKER_DEMO` never falls back to local data; `LIVE` remains rejected.
 
@@ -137,7 +137,7 @@ A review finds no live endpoint, live enablement path, silent broker-demo fallba
 
 ## Exit criteria
 
-Phase 0 is **verified** only when all required deliverables exist, all acceptance scenarios pass, the baseline manifest is recorded, documentation is internally consistent, and the roadmap links to the evidence. Until then, Phase 0 remains **proposed** or **implemented but unverified**.
+Phase 0 is **verified** because the required deliverables, acceptance scenarios, baseline manifest, documentation cross-reference, and operator acceptance evidence are recorded. This does not verify the later multi-day forward-test phase or enable live trading.
 
 ## Next-session todo queue
 
@@ -161,7 +161,7 @@ Execute these in order:
 Only after Phase 0 verification may implementation begin for Exness MT5 broker-demo read-only readiness. Phase 1 must use the selected Exness MT5 architecture and `BaseBroker` contract; it must not introduce OANDA code or reopen provider selection without a documented architecture decision and impact review.
 ## Executable slice contract — P0-S1 baseline freeze
 
-**Status:** Implemented locally; external credential and broker-demo acceptance evidence remain blocked.
+**Status:** Verified; the Phase 0 baseline evidence and operator acceptance record are complete.
 
 ### Problem and scope
 
@@ -205,4 +205,4 @@ Reject unknown modes/providers, unsafe endpoints, invalid paper/live flags, miss
 
 ### Exit gate
 
-Phase 0 remains implemented locally but unverified until every applicable acceptance scenario and required external/demo evidence has been recorded. The local command and artifact evidence is archived in `docs/PHASE-0-BASELINE-MANIFEST.md`. Only then may the Phase 1 slice be implemented or operationally relied upon.
+Phase 0 is verified. The local command and artifact evidence is archived in `docs/PHASE-0-BASELINE-MANIFEST.md`; later phases retain their own acceptance gates and no live-trading capability is enabled.

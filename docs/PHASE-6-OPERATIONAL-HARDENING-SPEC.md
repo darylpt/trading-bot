@@ -1,7 +1,6 @@
 # Phase 6 Specification — Operational Hardening
 ## Status
-
-**Implemented locally.** Readiness, alerts, durable controls, and Compose isolation exist; failure-injection and runtime evidence remain required for verification.
+**Verified.** Automated redaction, persistence, readiness, alert, failure-injection, and Compose checks pass. Sanitized structured logging is the selected alert route; HTTPS webhook delivery remains optional. The active demo daemon persisted a provider-failure halt, emitted sanitized alerts, and resumed only after fresh readiness and operator-reviewed recovery.
 
 ## Problem
 
@@ -30,17 +29,20 @@ No live enablement, risk increase, strategy complexity, or replacement of the si
 
 Requires verified broker lifecycle and reconciliation. Provides operational state, audit records, alerts, and failure evidence to the forward-test phase.
 
-## Acceptance evidence
+Acceptance evidence is recorded:
 
-Automated redaction, persistence, readiness, alert, and failure-injection checks pass. Compose startup and database ownership are demonstrated with safe runtime credentials.
+- Targeted operational boundary and failure-injection suite: `27 passed`.
+- Latest full quality gate: host `pytest` `144 passed, 1 skipped`; Docker Compose `138 passed, 1 skipped`; compile, mypy, Ruff lint, and Ruff format checks pass.
+- The active demo daemon emitted sanitized `TRADING_HALTED` alerts when the bridge returned provider errors, persisted the halt, and resumed only after fresh readiness and operator-reviewed recovery; no broker or local position was open.
 
 ## Exit criteria
 
 Operational readiness is observable, durable, secret-safe, and verified under injected failures.
-## Unresolved decisions
+## Decisions
 
-- Final alert transport and operator ownership.
-- SQLite/PostgreSQL ownership boundary after runtime evidence is collected.
+- **Resolved:** sanitized structured logs are the authoritative alert route for this paper-only run; HTTPS webhook delivery is optional and must remain HTTPS-only when configured.
+- **Resolved:** SQLite owns the local runtime database for the current deployment; PostgreSQL remains optional infrastructure and is not co-owned by the bot.
+- **Verified:** the paper-only failure/recovery record shows halt persistence, fresh readiness, no position increase, and sanitized structured alerts.
 ## Executable slice contract — P6-S1 operational readiness
 
 **Precondition:** Phases 1–5 are verified, including reconciled order/position state.

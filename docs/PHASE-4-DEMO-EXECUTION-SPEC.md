@@ -1,7 +1,7 @@
 # Phase 4 Specification — Exness Demo Execution
 ## Status
 
-**Implemented locally.** Demo execution is gate-routed and fail-closed; protected-fill and reconciliation evidence remain required for verification.
+**Verified.** The single execution gate completed a protected `0.01` LONG `XAUUSDm` demo lifecycle with broker retcode `10009`, confirmed SL/TP, reconciliation, safe close, durable `FILLED`/`CLOSED` state, and no residual broker position. Later operational continuity remains governed by Phases 5–7.
 
 ## Problem
 
@@ -63,9 +63,9 @@ The gate revalidates mode, account, quote, risk, exits, and broker constraints i
 
 ### Observed provider blocker and corrective contract
 
-The controlled Exness attempts reached the bridge order-submit path after readiness passed, but the bridge returned HTTP `503` with `UNKNOWN`; no normal MT5 `order_result` was logged. Follow-up status reads found no open position, while reconciliation was reported as unavailable. This is not evidence of a fill and must not trigger a retry.
+Historical controlled Exness attempts reached the bridge order-submit path after readiness passed but returned sanitized `UNKNOWN` or deterministic `REJECTED` outcomes; no blind retry was allowed. After the native MT5 dispatch fix and provider-valid comment length, a later controlled order completed with broker retcode `10009`, confirmed protection, reconciliation, and safe closure. The earlier failure halt was explicitly reset after operator review.
 
-Before another submission, the bridge must expose sanitized, phase-specific diagnostics for `order_check` and `order_send` (MT5 retcode/comment, last-error code/comment, filling mode, symbol constraints, and request phase). Deterministic `order_check` rejection must return `REJECTED`; only an ambiguous `order_send` transport/provider failure may return `UNKNOWN` and halt entries. Add a non-submitting order-preflight path and tests for both transitions.
+The corrective implementation exposes sanitized `order_check` and `order_send` phase diagnostics, including MT5 retcode/comment, last-error code/comment, filling mode, symbol constraints, and safe request facts. Deterministic `order_check` failures return `REJECTED`; ambiguous `order_send` failures remain `UNKNOWN` and halt entries. The `order.preflight` RPC/REST path runs `order_check` without submission. Focused bridge, adapter, persistence, and execution tests cover these transitions. Evidence now includes an accepted protected preflight and one controlled `0.01` LONG demo order with broker retcode `10009`, confirmed exits, reconciliation, safe closure, and durable local records.
 
 ### Acceptance scenarios
 

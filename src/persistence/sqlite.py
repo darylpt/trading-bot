@@ -47,6 +47,25 @@ class ExecutionLogRecord:
 
 
 @dataclass(frozen=True)
+class LLMDecisionRecord:
+    """Sanitized, validated sentiment-gate decision for operator audit."""
+
+    evaluated_at: datetime
+    instrument: str
+    strategy_name: str
+    technical_action: Literal["BUY", "SELL"]
+    provider: str
+    model: str
+    decision: Literal["CONFIRM", "REJECT", "ADJUST_RISK"]
+    gate_reason: str
+    sentiment_score: Decimal | None
+    confidence_score: Decimal
+    risk_modifier: Decimal
+    reasoning: str
+    news_event_count: int
+
+
+@dataclass(frozen=True)
 class PositionRecord:
     """Persisted paper position lifecycle state."""
 
@@ -139,18 +158,22 @@ class SQLiteRepository:
         self.initialize_schema()
 
     def initialize_schema(self) -> None:
-        """Create tables and migrate legacy trade status constraints."""
         legacy_sql = self.connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'trade_logs'"
         ).fetchone()
-        if legacy_sql is not None and "PARTIALLY_FILLED" not in str(legacy_sql[0]):
+        legacy_status_sql = "" if legacy_sql is None else str(legacy_sql[0])
+        requires_trade_status_migration = any(
+            marker not in legacy_status_sql
+            for marker in ("PARTIALLY_FILLED", "ORDER_NOT_FOUND")
+        )
+        if legacy_sql is not None and requires_trade_status_migration:
             self.connection.execute(
                 "ALTER TABLE trade_logs RENAME TO trade_logs_legacy"
             )
             self.connection.commit()
         schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         self.connection.executescript(schema)
-        if legacy_sql is not None and "PARTIALLY_FILLED" not in str(legacy_sql[0]):
+        if legacy_sql is not None and requires_trade_status_migration:
             self.connection.execute(
                 """INSERT INTO trade_logs
                    SELECT client_order_id, instrument, direction, quantity,
@@ -236,6 +259,7 @@ class SQLiteRepository:
             "REJECTED",
             "CANCELLED",
             "EXPIRED",
+            "ORDER_NOT_FOUND",
             "UNKNOWN",
         }:
             raise ValueError("invalid trade status")
@@ -442,6 +466,57 @@ class SQLiteRepository:
                 ),
                 record.latency_ms,
                 None if record.slippage is None else str(record.slippage),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self.connection.commit()
+
+    def save_llm_decision(self, record: LLMDecisionRecord) -> None:
+        """Persist one validated sentiment-gate evaluation without raw payloads."""
+        if not record.instrument or not record.strategy_name:
+            raise ValueError("LLM decision scope is required")
+        if not record.provider or not record.model:
+            raise ValueError("LLM provider and model are required")
+        if not record.gate_reason:
+            raise ValueError("LLM gate reason is required")
+        if record.sentiment_score is not None and not (
+            Decimal("-1") <= record.sentiment_score <= Decimal("1")
+        ):
+            raise ValueError("LLM sentiment score is outside [-1, 1]")
+        if not Decimal("0") <= record.confidence_score <= Decimal("1"):
+            raise ValueError("LLM confidence score is outside [0, 1]")
+        if not Decimal("0") < record.risk_modifier <= Decimal("1"):
+            raise ValueError("LLM risk modifier is outside (0, 1]")
+        if record.news_event_count < 0:
+            raise ValueError("LLM news event count must be non-negative")
+        reasoning = record.reasoning.strip()
+        if not reasoning:
+            raise ValueError("LLM reasoning is required")
+        self.connection.execute(
+            """INSERT INTO llm_decisions
+               (evaluated_at, instrument, strategy_name, technical_action,
+                provider, model, decision, gate_reason, sentiment_score,
+                confidence_score, risk_modifier, reasoning, news_event_count,
+                created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                record.evaluated_at.isoformat(),
+                record.instrument,
+                record.strategy_name,
+                record.technical_action,
+                record.provider,
+                record.model,
+                record.decision,
+                record.gate_reason,
+                (
+                    None
+                    if record.sentiment_score is None
+                    else str(record.sentiment_score)
+                ),
+                str(record.confidence_score),
+                str(record.risk_modifier),
+                reasoning[:2000],
+                record.news_event_count,
                 datetime.now(timezone.utc).isoformat(),
             ),
         )

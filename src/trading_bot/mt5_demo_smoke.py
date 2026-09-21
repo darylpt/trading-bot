@@ -95,7 +95,7 @@ def run_smoke() -> dict[str, object]:
             entry + target_distance if direction == "LONG" else entry - target_distance
         )
         order = OrderIntent(
-            client_order_id=f"mt5-smoke-{timestamp.strftime('%Y%m%dT%H%M%S%fZ')}",
+            client_order_id=f"mt5-{timestamp.strftime('%Y%m%dT%H%M%S%fZ')}",
             instrument="XAUUSDm",
             direction=direction,
             quantity=quantity,

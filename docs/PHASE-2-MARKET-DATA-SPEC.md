@@ -1,7 +1,7 @@
 # Phase 2 Specification — Broker Market Data Continuity
 ## Status
 
-**Implemented locally.** Broker quote/candle validation and backfill code exist; broker historical session/maintenance gaps are preserved explicitly, while live freshness and continuity evidence remains required for verification.
+**Verified.** Broker quote/candle validation and backfill code exist; broker historical session/maintenance gaps are preserved explicitly. The controlled demo run passed fresh quote/candle readiness and repeated bridge quote/candle polling before a later freshness incident. The current incident is correctly fail-closed: Windows NTP status is unsynchronized (`Local CMOS Clock`) and `w32tm` measured approximately `+5.52s` local offset, matching the apparent quote lead; no tolerance was relaxed and no entry occurred.
 
 ## Problem
 
@@ -29,17 +29,19 @@ No broker order submission, broker-aware sizing, live mode, or strategy redesign
 
 Requires verified Phase 1 readiness and supplies typed quotes, candles, freshness, continuity, and halt state to strategy and risk boundaries.
 
-## Acceptance evidence
+Acceptance evidence is recorded:
 
-Tests cover stale/crossed/wide-spread quotes, timestamp drift, gaps, duplicates, out-of-order candles, symbol/timeframe mismatch, weekend/rollover boundaries, and restart recovery. A controlled demo check proves backfill and live quote continuity.
+- Complete market-data acceptance tests: `33 passed`, including bridge routing, stale/future quote rejection, candle chronology/gap validation, aggregation, persistence, and no simulated fallback in broker-demo mode.
+- Controlled demo evidence: authenticated Exness bridge, `256` closed candles, valid XAUUSDm quote/spread, repeated live quote/candle polling, persisted active instrument, and safe restart behavior.
+- Failure evidence: the current stale/future provider data transitioned startup to a fail-closed halt without an order or position increase.
 
 ## Exit criteria
 
 The broker market-data path is restart-safe, observable, and verified against the listed failure and continuity scenarios.
-## Unresolved decisions
+## Resolved decisions
 
-- Exact broker candle and quote transport once Phase 1 selects the deployment boundary.
-- Retention and schema details for persisted aggregation state.
+- **Resolved:** Phase 1's Option B native Windows Exness bridge is the broker candle/quote transport.
+- **Resolved:** the existing SQLite-backed CSV aggregation state and provider timestamps are the persistence contract; known broker session/maintenance gaps remain explicit rather than synthesized.
 ## Executable slice contract — P2-S1 broker market-data continuity
 
 **Precondition:** the Phase 1 read-only readiness slice is verified.

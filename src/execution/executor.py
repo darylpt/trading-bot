@@ -143,6 +143,11 @@ class ExecutionGate:
                             status=reconciled.status,
                             rejection_reason=reconciled.rejection_reason,
                         )
+                        if reconciled.status == "ORDER_NOT_FOUND":
+                            self._repository.set_trading_halt(
+                                True,
+                                reason="broker order was not found; operator review required",
+                            )
                         return reconciled
                     return self._result(
                         order,
@@ -169,6 +174,11 @@ class ExecutionGate:
                         status=reconciled.status,
                         rejection_reason=reconciled.rejection_reason,
                     )
+                    if reconciled.status == "ORDER_NOT_FOUND":
+                        self._repository.set_trading_halt(
+                            True,
+                            reason="broker order was not found; operator review required",
+                        )
                     return reconciled
                 return self._result(
                     order,
@@ -222,7 +232,18 @@ class ExecutionGate:
     def _reconcile_order(self, client_order_id: str) -> ExecutionResult | None:
         """Read an order state; never blindly retry submission."""
         try:
-            return self._gateway.reconcile_order(client_order_id)
+            result = self._gateway.reconcile_order(client_order_id)
+            if (
+                result is not None
+                and result.status == "ORDER_NOT_FOUND"
+                and self._repository is not None
+                and self._environment.upper() == "DEMO"
+            ):
+                self._repository.set_trading_halt(
+                    True,
+                    reason="broker order was not found; operator review required",
+                )
+            return result
         except (BrokerConnectionError, TimeoutError, ConnectionError):
             if self._repository is not None and self._environment.upper() == "DEMO":
                 self._repository.set_trading_halt(
@@ -248,6 +269,11 @@ class ExecutionGate:
                     status=result.status,
                     rejection_reason=result.rejection_reason,
                 )
+                if result.status == "ORDER_NOT_FOUND":
+                    self._repository.set_trading_halt(
+                        True,
+                        reason="broker order was not found; operator review required",
+                    )
             elif self._environment.upper() == "DEMO":
                 self._repository.set_trading_halt(
                     True, reason="broker order reconciliation is UNKNOWN"

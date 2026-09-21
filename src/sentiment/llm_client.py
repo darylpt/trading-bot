@@ -7,6 +7,11 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from threading import Thread
 from typing import Protocol
+
+from ollama import Client
+from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
+
 from sentiment.models import SentimentAnalysisResult
 from sentiment.news_adapter import format_news_payload
 from sentiment.parser import parse_llm_sentiment_response
@@ -14,10 +19,11 @@ from sentiment.parser import parse_llm_sentiment_response
 
 SYSTEM_INSTRUCTION = (
     "You are a financial-news sentiment analyst. Return ONLY one raw JSON object "
-    "with exactly these fields: decision (CONFIRM, REJECT, or ADJUST_RISK), "
+    "with exactly these fields: sentiment_score (number from -1.0 to 1.0), "
     "confidence_score (number from 0.0 to 1.0), reasoning (string), and "
-    "risk_modifier (number greater than 0.0 and at most 1.0). Do not use markdown. "
-    "Do not provide order instructions, prices, position sizes, or broker actions."
+    "risk_modifier (number greater than 0.0 and at most 1.0). "
+    "Do not use markdown. Do not provide order instructions, prices, position "
+    "sizes, or broker actions."
 )
 
 
@@ -129,6 +135,123 @@ class LLMSentimentClient(ABC):
     def _request_json(self, context: str) -> str:
         """Return raw provider JSON or raise a provider/timeout exception."""
         raise NotImplementedError
+
+
+class _OpenAIMessage(OpenAIMessage):
+    def __init__(self, content: str | None) -> None:
+        self.content = content
+
+
+class _OpenAIChoice(OpenAIChoice):
+    def __init__(self, message: _OpenAIMessage) -> None:
+        self.message = message
+
+
+class _OpenAIResponse(OpenAIResponse):
+    def __init__(self, choices: list[_OpenAIChoice]) -> None:
+        self.choices = choices
+
+
+class _OpenAICompletionsAdapter(OpenAICompletions):
+    def __init__(self, client: OpenAI) -> None:
+        self._client = client
+
+    def create(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        response_format: dict[str, str],
+        timeout: float,
+    ) -> OpenAIResponse:
+        if model != "gpt-4o-mini" or len(messages) != 2:
+            raise ValueError("unsupported OpenAI sentiment request")
+        sdk_messages: list[ChatCompletionMessageParam] = [
+            {"role": "system", "content": messages[0]["content"]},
+            {"role": "user", "content": messages[1]["content"]},
+        ]
+        response = self._client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=sdk_messages,
+            response_format={"type": "json_object"},
+            timeout=timeout,
+        )
+        return _OpenAIResponse(
+            [
+                _OpenAIChoice(_OpenAIMessage(choice.message.content))
+                for choice in response.choices
+            ]
+        )
+
+
+class _OpenAIChatAdapter(OpenAIChat):
+    def __init__(self, client: OpenAI) -> None:
+        self.completions = _OpenAICompletionsAdapter(client)
+
+
+class _OpenAIClientAdapter(OpenAIClient):
+    def __init__(self, client: OpenAI) -> None:
+        self.chat = _OpenAIChatAdapter(client)
+
+
+class _OllamaMessage(OllamaMessage):
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _OllamaResponse(OllamaResponse):
+    def __init__(self, message: _OllamaMessage) -> None:
+        self.message = message
+
+
+class _OllamaClientAdapter(OllamaClient):
+    def __init__(self, client: Client) -> None:
+        self._client = client
+
+    def chat(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        format: str,
+        options: dict[str, object],
+    ) -> OllamaResponse:
+        if format != "json":
+            raise ValueError("Ollama sentiment output must be JSON")
+        response = self._client.chat(
+            model=model,
+            messages=messages,
+            format="json",
+            options={"temperature": 0.0},
+        )
+        content = response.message.content
+        if content is None:
+            raise ValueError("Ollama sentiment response had no content")
+        return _OllamaResponse(_OllamaMessage(content))
+
+
+def create_openai_sentiment_adapter(
+    api_key: str, *, timeout_seconds: float = 5.0
+) -> OpenAISentimentAdapter:
+    """Create the provider adapter behind a typed SDK boundary."""
+    return OpenAISentimentAdapter(
+        _OpenAIClientAdapter(OpenAI(api_key=api_key)),
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def create_ollama_sentiment_adapter(
+    base_url: str,
+    *,
+    model: str = "llama3.1",
+    timeout_seconds: float = 5.0,
+) -> OllamaSentimentAdapter:
+    """Create the provider adapter behind a typed SDK boundary."""
+    return OllamaSentimentAdapter(
+        _OllamaClientAdapter(Client(host=base_url)),
+        model=model,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 class OpenAISentimentAdapter(LLMSentimentClient):

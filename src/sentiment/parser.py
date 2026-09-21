@@ -15,7 +15,7 @@ _FALLBACK_REASON = "LLM sentiment response was invalid or unavailable"
 
 def _rejected_result() -> SentimentAnalysisResult:
     return SentimentAnalysisResult(
-        decision="REJECT",
+        sentiment_score=None,
         confidence_score=0.0,
         reasoning=_FALLBACK_REASON,
         risk_modifier=1.0,

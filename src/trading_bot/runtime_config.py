@@ -13,6 +13,7 @@ SUPPORTED_INSTRUMENTS: Final[tuple[str, ...]] = (
     "ETH_USD",
     "XAUUSDm",
     "EUR_USD",
+    "EURUSDm",
 )
 SUPPORTED_STRATEGIES: Final[tuple[str, ...]] = (
     "ema_crossover",

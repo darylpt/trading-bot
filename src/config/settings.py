@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import time
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -138,6 +139,27 @@ class Settings(BaseSettings):
     tick_interval_seconds: Decimal = Field(
         default=Decimal("60"), validation_alias="TICK_INTERVAL_SECONDS", gt=0
     )
+    forward_test_enabled: bool = Field(
+        default=False, validation_alias="FORWARD_TEST_ENABLED"
+    )
+    forward_test_window_start_utc: time = Field(
+        default=time(13, 0), validation_alias="FORWARD_TEST_WINDOW_START_UTC"
+    )
+    forward_test_window_end_utc: time = Field(
+        default=time(16, 0), validation_alias="FORWARD_TEST_WINDOW_END_UTC"
+    )
+    alert_route: Literal["structured_log", "webhook"] = Field(
+        default="structured_log", validation_alias="ALERT_ROUTE"
+    )
+    alert_webhook_url: AnyHttpUrl | None = Field(
+        default=None, validation_alias="ALERT_WEBHOOK_URL"
+    )
+    alert_webhook_timeout_seconds: Decimal = Field(
+        default=Decimal("5"),
+        validation_alias="ALERT_WEBHOOK_TIMEOUT_SECONDS",
+        gt=0,
+        le=30,
+    )
     account_equity: Decimal | None = Field(
         default=None, validation_alias="ACCOUNT_EQUITY", gt=0
     )
@@ -159,9 +181,54 @@ class Settings(BaseSettings):
     sentiment_provider: Literal["openai", "ollama"] = Field(
         default="openai", validation_alias="SENTIMENT_PROVIDER"
     )
+    sentiment_interval_seconds: Decimal = Field(
+        default=Decimal("900"),
+        validation_alias="SENTIMENT_INTERVAL_SECONDS",
+        gt=0,
+    )
+    sentiment_threshold: Decimal = Field(
+        default=Decimal("0.50"),
+        validation_alias="SENTIMENT_THRESHOLD",
+        gt=0,
+        lt=1,
+    )
+    news_events_path: Path | None = Field(
+        default=None, validation_alias="NEWS_EVENTS_PATH"
+    )
+    news_feed_url: str = Field(
+        default="https://nfs.faireconomy.media/ff_calendar_thisweek.xml",
+        validation_alias="NEWS_FEED_URL",
+    )
+    news_refresh_seconds: Decimal = Field(
+        default=Decimal("900"),
+        validation_alias="NEWS_REFRESH_SECONDS",
+        gt=0,
+    )
+    news_max_age_seconds: Decimal = Field(
+        default=Decimal("3600"),
+        validation_alias="NEWS_MAX_AGE_SECONDS",
+        gt=0,
+    )
+    historical_calendar_provider: Literal["eodhd"] = Field(
+        default="eodhd", validation_alias="HISTORICAL_CALENDAR_PROVIDER"
+    )
+    historical_calendar_url: AnyHttpUrl = Field(
+        default=AnyHttpUrl("https://eodhd.com/api/economic-events"),
+        validation_alias="HISTORICAL_CALENDAR_URL",
+    )
+    historical_calendar_api_key: str | None = Field(
+        default=None, validation_alias="HISTORICAL_CALENDAR_API_KEY"
+    )
+    historical_calendar_archive_path: Path = Field(
+        default=Path("data/historical_calendar"),
+        validation_alias="HISTORICAL_CALENDAR_ARCHIVE_PATH",
+    )
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     ollama_base_url: AnyHttpUrl | None = Field(
         default=None, validation_alias="OLLAMA_BASE_URL"
+    )
+    ollama_model: str = Field(
+        default="llama3.1", validation_alias="OLLAMA_MODEL", min_length=1
     )
     postgres_db: str | None = Field(default=None, validation_alias="POSTGRES_DB")
     postgres_user: str | None = Field(default=None, validation_alias="POSTGRES_USER")
@@ -240,6 +307,23 @@ class Settings(BaseSettings):
                 raise ValueError("BROKER_DEMO account is missing")
             if account_id != DEMO_ACCOUNT_ID:
                 raise ValueError("BROKER_DEMO account is not allowlisted")
+        if self.forward_test_window_start_utc >= self.forward_test_window_end_utc:
+            raise ValueError("forward-test window must end after it starts")
+        if self.forward_test_enabled and self.trading_mode != "BROKER_DEMO":
+            raise ValueError("FORWARD_TEST_ENABLED requires BROKER_DEMO")
+        if self.alert_route == "webhook" and self.alert_webhook_url is None:
+            raise ValueError("ALERT_ROUTE=webhook requires ALERT_WEBHOOK_URL")
+        if self.alert_webhook_url is not None:
+            parsed_alert_url = urlparse(str(self.alert_webhook_url))
+            if (
+                parsed_alert_url.scheme != "https"
+                or parsed_alert_url.username is not None
+                or parsed_alert_url.password is not None
+                or parsed_alert_url.hostname is None
+            ):
+                raise ValueError(
+                    "ALERT_WEBHOOK_URL must be an HTTPS URL without userinfo"
+                )
         if self.daily_drawdown_limit <= 0:
             raise ValueError("daily drawdown limit must be positive")
         validate_instrument(self.instrument)
