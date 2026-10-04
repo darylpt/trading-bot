@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -14,17 +15,46 @@ from openai.types.chat import ChatCompletionMessageParam
 
 from sentiment.models import SentimentAnalysisResult
 from sentiment.news_adapter import format_news_payload
-from sentiment.parser import parse_llm_sentiment_response
+from sentiment.parser import (
+    SentimentParseResult,
+    parse_llm_sentiment_response_with_status,
+)
 
+LOGGER = logging.getLogger(__name__)
 
 SYSTEM_INSTRUCTION = (
     "You are a financial-news sentiment analyst. Return ONLY one raw JSON object "
-    "with exactly these fields: sentiment_score (number from -1.0 to 1.0), "
-    "confidence_score (number from 0.0 to 1.0), reasoning (string), and "
-    "risk_modifier (number greater than 0.0 and at most 1.0). "
+    "with exactly these fields: sentiment_score (a number from -1.0 to 1.0 or "
+    "null when evidence is insufficient), confidence_score (a number from 0.0 to "
+    "1.0), reasoning (a non-empty string), and risk_modifier (a number greater "
+    "than 0.0 and at most 1.0). Reflect the news evidence in sentiment_score: "
+    "bullish evidence is positive, bearish evidence is negative, and neutral or "
+    "insufficient evidence is near zero or null. The application uses the "
+    "technical_signal.direction and its configured threshold to decide whether "
+    "that score supports BUY or SELL; do not replace this decision with "
+    "risk_modifier. risk_modifier is only a positive position-sizing reduction "
+    "applied after the sentiment gate approves; it is never a veto. If the score "
+    "does not support the technical direction, set risk_modifier to 1.0 because "
+    "no position will be sized. Otherwise use 1.0 unless specific evidence "
+    "supports reducing size, and never return zero or a negative value. A valid "
+    "bearish SELL example is "
+    '{"sentiment_score":-0.8,"confidence_score":0.9,'
+    '"reasoning":"Reliable evidence supports a bearish outlook.",'
+    '"risk_modifier":1.0}. A valid uncertain response is '
+    '{"sentiment_score":null,"confidence_score":0.0,'
+    '"reasoning":"Insufficient reliable context.","risk_modifier":1.0}. '
     "Do not use markdown. Do not provide order instructions, prices, position "
     "sizes, or broker actions."
 )
+
+_OLLAMA_SENTIMENT_SCHEMA = SentimentAnalysisResult.model_json_schema()
+_OLLAMA_SENTIMENT_SCHEMA["required"] = list(_OLLAMA_SENTIMENT_SCHEMA["properties"])
+
+_OLLAMA_RISK_MODIFIER_VALUES = [value / 100 for value in range(1, 101)]
+_OLLAMA_SENTIMENT_SCHEMA["properties"]["risk_modifier"]["enum"] = (
+    _OLLAMA_RISK_MODIFIER_VALUES
+)
+_OLLAMA_KEEP_ALIVE = "20m"
 
 
 class OpenAIMessage(Protocol):
@@ -72,7 +102,7 @@ class OllamaClient(Protocol):
         *,
         model: str,
         messages: list[dict[str, str]],
-        format: str,
+        format: dict[str, object],
         options: dict[str, object],
     ) -> OllamaResponse: ...
 
@@ -118,18 +148,32 @@ class LLMSentimentClient(ABC):
         technical_signal: dict[str, object],
     ) -> SentimentAnalysisResult:
         """Analyze normalized context and reject all provider failures."""
+        return self.analyze_with_status(headlines, technical_signal).result
+
+    def analyze_with_status(
+        self,
+        headlines: list[dict[str, object]],
+        technical_signal: dict[str, object],
+    ) -> SentimentParseResult:
+        """Return sanitized parse/provider status for offline diagnostics."""
         context = format_news_payload(headlines, technical_signal)
         try:
             raw_response = _call_with_timeout(
                 lambda: self._request_json(context), self.timeout_seconds
             )
         except TimeoutError as exc:
-            return parse_llm_sentiment_response(exc)
-        except Exception:
-            # Provider SDKs expose different rate-limit and transport exceptions.
-            # Any unexpected provider failure must remain a rejected decision.
-            return parse_llm_sentiment_response("")
-        return parse_llm_sentiment_response(raw_response)
+            LOGGER.warning(
+                "sentiment provider request failed error_class=%s",
+                type(exc).__name__,
+            )
+            return parse_llm_sentiment_response_with_status(exc)
+        except Exception as exc:
+            LOGGER.warning(
+                "sentiment provider request failed error_class=%s",
+                type(exc).__name__,
+            )
+            return parse_llm_sentiment_response_with_status(None)
+        return parse_llm_sentiment_response_with_status(raw_response)
 
     @abstractmethod
     def _request_json(self, context: str) -> str:
@@ -213,16 +257,17 @@ class _OllamaClientAdapter(OllamaClient):
         *,
         model: str,
         messages: list[dict[str, str]],
-        format: str,
+        format: dict[str, object],
         options: dict[str, object],
     ) -> OllamaResponse:
-        if format != "json":
-            raise ValueError("Ollama sentiment output must be JSON")
+        if format.get("type") != "object":
+            raise ValueError("Ollama sentiment output must use a JSON object schema")
         response = self._client.chat(
             model=model,
             messages=messages,
-            format="json",
+            format=format,
             options={"temperature": 0.0},
+            keep_alive=_OLLAMA_KEEP_ALIVE,
         )
         content = response.message.content
         if content is None:
@@ -304,7 +349,7 @@ class OllamaSentimentAdapter(LLMSentimentClient):
                 {"role": "system", "content": SYSTEM_INSTRUCTION},
                 {"role": "user", "content": context},
             ],
-            format="json",
+            format=_OLLAMA_SENTIMENT_SCHEMA,
             options={"temperature": 0.0},
         )
         return response.message.content
